@@ -25,3 +25,5 @@ llm_db/
 .vscode/
 
 ob_wiki/
+
+.DS_Store/
