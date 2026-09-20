@@ -41,6 +41,9 @@ The backend leverages langchain's `create_agent` under the hood to orchestrate t
 **Frontend**
 - Vite · Vue 3.5 · markdown-it · highlight.js · DOMPurify · vitest (Testing)
 
+**Other**
+- OceanBase Distributed Database Enterprise Edition 4.2.5 · OCP Enterprise Edition 4.2.5
+
 ---
 
 ## Directory Structure

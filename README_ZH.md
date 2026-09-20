@@ -42,6 +42,9 @@ OCP（OceanBase 管控平台）元数据与只读 SQL，并以 **SSE 流式**返
 **前端**
 - Vite · Vue 3.5 · markdown-it · highlight.js · DOMPurify · vitest（测试）
 
+**其他**
+- Oceanbase分布式数据库企业版4.2.5 · OCP企业版4.2.5 
+
 ---
 
 ## 目录结构
