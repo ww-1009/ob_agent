@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+dist/
+.env
+config.yaml
+backend/config.yaml
+backend/data/real_*.json
+.DS_Store
+**/.DS_Store
+
+# 本地临时产物（不入库）
+.tmptest/
+pytest-cache-files-*/
+
+# 参考工程（不并入本仓库；仅作 OCP 接口借鉴）
+llm_db/
+
+# IDE
+.idea/
+.vscode/
+
+ob_wiki/

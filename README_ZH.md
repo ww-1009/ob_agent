@@ -1,0 +1,374 @@
+# OceanBase DB Agent
+
+排查 OceanBase 数据库问题、优化 SQL 性能的对话式 agent（**FastAPI 后端** + **Vue 3 前端**）。
+
+用户用自然语言提问（如“有哪些慢SQL？”），后端基于 langchain + langgraph 编排 LLM 与工具，实时检索
+OCP（OceanBase 管控平台）元数据与只读 SQL，并以 **SSE 流式**返回诊断结果；前端为 Vue 3 + Vite 的聊天界面。
+
+后端底层用 langchain `create_agent` 编排工具，OCP 客户端与 SQL 执行器为**双适配器**
+
+---
+
+## 目录
+
+- [技术栈](#技术栈)
+- [目录结构](#目录结构)
+- [本地开发（推荐 mock 模式，离线）](#本地开发推荐-mock-模式离线)
+  - [后端](#后端)
+  - [前端](#前端)
+- [配置说明](#配置说明)
+  - [config.yaml 字段](#configyaml-字段)
+  - [配置优先级](#配置优先级)
+- [部署（生产环境）](#部署生产环境)
+  - [整体拓扑](#整体拓扑)
+  - [第 0 步：准备运行时数据（重要）](#第-0-步准备运行时数据重要)
+  - [第 1 步：后端部署](#第-1-步后端部署)
+  - [第 2 步：前端构建与静态资源托管](#第-2-步前端构建与静态资源托管)
+  - [第 3 步：反向代理与 /api 转发](#第-3-步反向代理与-api-转发)
+- [生产运行示例：Nginx + systemd](#生产运行示例nginx--systemd)
+- [联调待确认清单](#联调待确认清单)
+
+---
+
+## 技术栈
+
+**后端**
+- Python ≥ 3.13
+- FastAPI（0.141）· Uvicorn · Pydantic v2
+- langchain 1.4 / langchain-core 1.6 / langgraph 1.2 / langchain-openai（OpenAI 兼容 LLM 接口）
+- httpx（OCP real 客户端）· PyMySQL（SQL real 执行器）· PyYAML · python-dotenv
+- 依赖与版本锁定见 `backend/requirements.txt`
+
+**前端**
+- Vite · Vue 3.5 · markdown-it · highlight.js · DOMPurify · vitest（测试）
+
+---
+
+## 目录结构
+
+```
+ob_agent/
+├── backend/                  # FastAPI 后端
+│   ├── app/
+│   │   ├── main.py           # create_app 装配（配置/LLM/工具/路由）
+│   │   ├── config.py         # 配置加载（YAML + .env + 环境变量）
+│   │   ├── sse.py            # SSE 帧序列化
+│   │   ├── agent/            # Agent 编排
+│   │   │   ├── runner.py     # create_agent 事件流 → 用户事件流（上下文压缩/超时/确认）
+│   │   │   ├── model.py      # 构建 ChatOpenAI
+│   │   │   ├── prompt.py     # System Prompt（DBA 助手 + 规则）
+│   │   │   ├── confirm.py    # HITL 人工确认通道（ConfirmationBroker + 中间件）
+│   │   │   ├── tools.py      # 暴露给 LLM 的 7 个工具 + ob_wiki 文件工具
+│   │   │   └── tool_input.py # 工具入参 Pydantic 模型
+│   │   ├── api/
+│   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
+│   │   │   └── confirm.py    # POST /api/chat/confirm（审批反向通道）
+│   │   └── tools/            # 双适配器实现
+│   │       ├── base.py       # 数据模型 / 异常 / 协议接口
+│   │       ├── ocp/          # OCP 客户端：mock.py（fixtures）/ real.py（httpx）
+│   │       └── sql/          # SQL 执行器：guard.py（只读防线）/ mock / real
+│   ├── run.py / run.sh       # 启动入口
+│   ├── requirements.txt
+│   ├── config.example.yaml   # 示例配置（入库）
+│   └── config.yaml           # 实际配置（gitignore，不入库）
+│   ├── ob_wiki/              # OceanBase 官方文档知识库（gitignore，运行时需就位）
+│   └── data/                 # mock fixtures（gitignore 部分）
+├── frontend/                 # Vue 3 + Vite 前端
+│   ├── src/                  # 组件 / composables / api / lib
+│   ├── tests/                # vitest 纯逻辑单测
+│   ├── index.html · vite.config.js · package.json
+│   └── dist/                 # npm run build 产物
+├── tests/                    # 后端 pytest（仓库根，pytest.ini testpaths=tests）
+└── README.md
+```
+
+> 说明：`backend/ob_wiki/`、`backend/config.yaml`、`backend/.env`、`frontend/dist/`、`.venv/`、
+> `node_modules/` 等生产/本地产物均已被 `.gitignore` 排除，**不会**通过 git 分发，见[部署注意事项](#第-0-步准备运行时数据重要)。
+
+---
+
+## 本地开发（推荐 mock 模式，离线）
+
+
+### 后端
+
+在**仓库根目录**执行：
+
+```bash
+# 一次性安装：创建 backend/.venv 并装入运行依赖 + dev 依赖（pytest 等，用于跑测试）
+pip install -r requirements.txt
+```
+
+启动服务（默认读不到 `backend/config.yaml` / `.env` 时按 mock 默认运行，无 LLM 也可启动）：
+
+```bash
+# 方式一：uvicorn 启动
+cd backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 方式二：用仓库内脚本（需先存在 backend/.venv，激活后启动）
+./backend/run.sh
+```
+
+探活：
+
+```bash
+curl -s http://127.0.0.1:8000/api/health
+```
+
+预期输出（mock 默认、未配置 LLM）：
+
+```json
+{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false}
+```
+
+聊天示例（SSE 流式；未配置 LLM 时返回 503 清晰提示）：
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/api/chat \
+  -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"有哪些慢SQL？"}]}'
+```
+
+> 未配置 LLM 时服务照常启动，`/api/chat` 返回 503 提示填写 LLM 配置；离线端到端验证由注入
+> stub 模型（`tests/helpers/scripted_model.py`）完成，不依赖真实 LLM。
+
+### 前端
+
+```bash
+cd frontend
+npm install        # 首次
+npm run dev        # http://127.0.0.1:5173（/api 已 proxy → 127.0.0.1:8000）
+```
+
+先按上文起好后端（mock 默认），再开前端。页面输入“有哪些慢SQL？”的行为分两种：未配置 LLM 时走
+**503 错误分支**（顶部提示“LLM 未配置”）；接入真实或桩 LLM 后，同一输入才可见
+`status` 灰字 → markdown 流式 → `done` 的演示闭环。
+
+---
+
+## 配置说明
+
+后端配置来源：**环境变量 > `backend/config.yaml` > 默认值**；空字符串环境变量不覆盖 YAML 已有非空值。
+也支持 `backend/.env`（dotenv 加载）。仓库只提交示例文件，实际文件由本地生成。
+
+```bash
+cp backend/config.example.yaml backend/config.yaml
+cp backend/.env.example backend/.env
+```
+
+### config.yaml 字段
+
+| 区块        | 字段                                                       | 说明                                              |
+| --------- | -------------------------------------------------------- | ----------------------------------------------- |
+| `ocp`     | `provider`                                               | `mock \| real`（**注意：** 本地 mock 演示请设为 `mock`）    |
+| `ocp`     | `base_url`                                               | 填 OCP 4.3.5 网关地址（如 `https://<ocp-host>:<port>`） |
+| `ocp`     | `username`/`password`                                    | HTTP Basic Auth（OCP 管理账号，非 /login 会话）           |
+| `ocp`     | `verify_ssl`                                             | 是否校验 OCP TLS 证书                                 |
+| `meta_db` | `provider`                                               | `mock \| real`                                  |
+| `meta_db` | `host`/`port`/`username`/`password`/`db_name`            | real 时直连元数据库（当前版本无用）                            |
+| `sql_ro`  | `provider`                                               | `mock \| real`                                  |
+| `sql_ro`  | `host_map`                                               | real 时：集群名 → 连接串的映射（dict 字符串）                   |
+| `sql_ro`  | `username`/`password`                                    | 只读数据库账号（建议仅授 SELECT）                            |
+| `sql_ro`  | `connect_timeout` / `query_timeout_seconds` / `max_rows` | 连接/查询超时与结果行数上限                                  |
+| `llm`     | `base_url`/`api_key`/`model`                             | OpenAI 兼容模型接口（三者齐全才算“已配置”）                      |
+| `llm`     | `temperature` / `max_input_tokens`                       | 采样温度 / 上下文压缩阈值基准                                |
+| `agent`   | `send_row_data`                                          | 送入 LLM 的结果是否含行数据                                |
+| `agent`   | `max_seconds`                                            | 单轮 agent 执行总时长兜底                                |
+| `agent`   | `confirm_db_ops`                                         | 是否开启 `execute_sql` 人工审批（HITL）                   |
+| `agent`   | `confirm_timeout_seconds`                                | 审批超时（超时默认拒绝）                                    |
+| `agent`   | `recursion_limit`                                        | langgraph 图最大递归步数                               |
+
+环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`）。
+
+### 配置优先级
+
+```
+环境变量（非空） > backend/config.yaml > 代码默认值
+```
+
+未配置 LLM 时：后端照常启动，`/api/chat` 返回 `503`；`/api/health` 的 `llm_configured` 为 `false`。
+
+---
+
+## 部署（生产环境）
+
+> 仓库内**未包含** Dockerfile / docker-compose，生产部署采用 **Uvicorn（后端）+ 静态托管 + 反向代理** 方案。
+> 前端构建产物为纯静态文件，且 API 走相对路径 `/api/*`，因此需要一个 Web 服务器托管静态资源并把 `/api`
+> 转发到后端，组成同一站点。
+
+### 整体拓扑
+
+```
+                         443/80
+  Browser  ──────────────►  Nginx（托管 frontend/dist 静态资源）
+                                │   /api/*  →  127.0.0.1:8000
+                                ▼
+                            Uvicorn（app.main:app, 后端）
+                                │
+                       ┌────────┴────────┐
+                       ▼                 ▼
+                    OCP 网关         只读数据库
+                 （ocp.base_url）  （meta_db / sql_ro）
+```
+
+### 第 0 步：准备运行时数据（重要）
+
+以下数据**不随 git 分发**（已被 `.gitignore` 忽略），部署时必须手动放置到
+`backend/`` 工作目录下：
+
+1. **`backend/config.yaml`** 与 **`backend/.env`**：按[配置说明](#配置说明)生成并填写真实值。
+2. **`backend/ob_wiki/`**：OceanBase 官方文档知识库目录。System Prompt 约定文档入口为
+   `./ob_wiki/README.md`，agent 通过文件工具（根目录限定在该目录）只读引用。**缺少该目录会导致文档检索功能不可用**。
+
+> 运行目录约定：后端以 `backend/` 为工作目录运行（`run.sh` 会 `cd` 到脚本所在目录），
+> 使 `./ob_wiki`、`./config.yaml`的相对路径生效。
+
+### 第 1 步：后端部署
+
+**A. 安装依赖并准备 venv**
+
+```bash
+cd backend
+python3.13 -m venv .venv            # 或使用 uv
+source .venv/bin/activate
+pip install -r requirements.txt      # 或：uv sync --project backend
+```
+
+生产环境建议**关闭 reload** 并常驻运行。
+
+**B. 用 Uvicorn 启动**
+
+```bash
+cd /path/to/ob_agent/backend
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+```
+
+- `--host 127.0.0.1`：后端只监听本机，由外部反向代理（Nginx）对外提供 443/80。
+- `--workers`：按机器核数与并发调整；如需更高吞吐可换 gunicorn + uvicorn worker。
+- 全程保持 `cd backend` 以确保 `./ob_wiki`、`./config.yaml` 相对路径正确。
+
+### 第 2 步：前端构建与静态资源托管
+
+```bash
+cd frontend
+npm ci            # 按 package-lock.json 精确安装
+npm run build     # 产物输出到 frontend/dist/
+```
+
+将 `frontend/dist/` 整个目录拷贝到部署机（或作为 Nginx root/alias 指向该目录）。
+产物为纯静态文件，不依赖 Node 运行时。
+
+### 第 3 步：反向代理与 /api 转发
+
+前端通过相对路径发起请求：
+
+- `POST /api/chat`（SSE 流式对话）
+- `POST /api/chat/confirm`（审批反向通道）
+- `GET /api/health`（健康检查）
+
+反向代理必须：
+1. 把静态资源（HTML/JS/CSS 等）从 `frontend/dist` 返回。
+2. 把 `/api/*` 转发到后端 `127.0.0.1:8000`。
+3. **关闭对 `/api` 的缓冲**（SSE 需要即时转发，避免 Nginx 缓冲导致流式不实时）。
+
+---
+
+## 生产运行示例：Nginx + systemd
+
+### 1）Nginx 站点配置
+
+`/etc/nginx/conf.d/ob-agent.conf`：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.example.com;   # 替换为真实域名/IP
+
+    root /var/www/ob-agent;                # frontend/dist 拷贝到的目录
+    index index.html;
+
+    # 静态资源（含 history 路由回退，本项目为单页无路由，index.html 即可）
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # API 反向代理（关键：SSE 需关闭缓冲）
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # SSE：禁用代理缓冲，保证流式即时
+        proxy_buffering off;
+        proxy_cache off;
+        # 流式/长连接超时放宽
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+> 生产建议再叠加 TLS（Let’s Encrypt / 证书）到 443，并用 `location /api/` 的
+> `proxy_pass http://127.0.0.1:8000;`（注意 URL 不含 `/`，保留原 URI 前缀 `/api`）。
+
+### 2）systemd 后端服务
+
+`/etc/systemd/system/ob-agent-backend.service`：
+
+```ini
+[Unit]
+Description=OceanBase DB Agent backend (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ob_agent/backend        # 必须为 backend，相对路径依赖它
+ExecStart=/opt/ob_agent/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+Restart=always
+RestartSec=3
+User=www-data                                 # 按实际运行用户调整
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用并启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ob-agent-backend
+sudo systemctl status ob-agent-backend
+```
+
+### 3）部署后验证
+
+```bash
+# 后端直连探活
+curl -s http://127.0.0.1:8000/api/health
+
+# 经 Nginx 走完整链路探活
+curl -s https://your-domain.example.com/api/health
+
+# SSE 流式对话（经 Nginx）
+curl -N -X POST https://your-domain.example.com/api/chat \
+  -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"有哪些慢SQL？"}]}'
+```
+
+浏览器打开站点，应看到“你好，我是 OceanBase DBA 助手”空态页，右上角健康徽章显示
+`ocp_provider / sql_provider · LLM 就绪/未配置`（对应 `GET /api/health` 返回的字段）。
+
+---
+
+
+
+## 联调待确认清单
+
+- **real OCP**：端点与鉴权按 OCP 4.3.5 官方文档填充（现为 NotImplementedError 骨架）。
+- **real SQL**：EXPLAIN 计划语义、大结果集游标（SSCursor）、`ob_query_timeout` 与只读账号授权范围。
+- **SSE**：客户端断开时确认服务端真中止（无孤儿 task）。
+- **LLM**：配置完成后，mock/演示提示（system prompt 规则 6）改为按 provider 注入。
+- **Oracle 租户**连接目前标记为 TODO（暂不支持，`execute_sql` / `get_table_ddl` 会提示）。

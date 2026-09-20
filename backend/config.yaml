@@ -1,0 +1,32 @@
+ocp:
+  provider: real            # mock | real
+  base_url: "http://xxxx:8080"              # real 时填 OCP 4.3.5 网关地址（如 https://<ocp-host>:<port>）
+  username: "xxxx"              # 鉴权：HTTP Basic Auth（OCP 管理账号，非 /login 会话）
+  password: "xxx"
+  verify_ssl: true
+meta_db:
+  provider: real            # mock | real
+  host: "test_shrbank_ob001"              
+  port: 3306
+  db_name: "llm_db"
+  username: "xxx@xxx#test_shrbank_ob001"
+  password: "xxxxx"
+  connect_timeout: 5
+  query_timeout_seconds: 10
+sql_ro:
+  provider: real            # mock | real
+  host_map: "{'test_shrbank_ob001': 'obproxy1.ops.xxxxx.xxxx:3306', 'test_shrbank_ob002': 'obproxy2.ops.xxxxx.xxxx:3306','test_shrbank_ob003': 'obproxy3.ops.xxxxx.xxxx:3306'}"
+  username: "xxxxx"
+  password: "xxxx"
+  connect_timeout: 5
+  query_timeout_seconds: 10
+  max_rows: 200
+llm:
+  base_url: "http://xxxxx"   # OpenAI 兼容
+  api_key: "xxxxxxxx"
+  model: "Qwen3.5-MoE-122B-A10B"
+  temperature: 0.7
+  max_input_tokens: 250000
+agent:
+  send_row_data: true       # false 时送入 LLM 的结果不含行数据
+  max_seconds: 180          # 单轮 agent 总时长兜底

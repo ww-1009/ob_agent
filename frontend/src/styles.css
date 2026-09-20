@@ -1,0 +1,181 @@
+/* 明暗主题：light-dark() 跟随系统。老浏览器无 light-dark() 时退回浅色（fallback 写在每处前） */
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #eef0f4;
+  --text: #1d2330;
+  --text-2: #5b6472;
+  --line: #e2e5ea;
+  --accent: #1668dc;
+  --on-accent: #ffffff;
+  --err: #d64545;
+  --code-bg: #f2f4f7;
+  --code-line: #dde1e8;
+  --radius: 12px;
+  /* hljs token 浅色 */
+  --syn-kw: #cf222e; --syn-str: #0a3069; --syn-num: #0550ae; --syn-com: #6e7781;
+  --syn-fn: #8250df; --syn-type: #953800; --syn-attr: #116329; --syn-built: #953800;
+  --syn-lit: #0550ae; --syn-tag: #116329; --syn-meta: #8250df;
+}
+@supports (color: light-dark(#000, #fff)) {
+  :root {
+    --bg: light-dark(#f6f7f9, #121418);
+    --panel: light-dark(#ffffff, #1c1f26);
+    --panel-2: light-dark(#eef0f4, #262a33);
+    --text: light-dark(#1d2330, #e6e8ee);
+    --text-2: light-dark(#5b6472, #9aa3b2);
+    --line: light-dark(#e2e5ea, #2e333d);
+    --accent: light-dark(#1668dc, #5b9dff);
+    --on-accent: light-dark(#ffffff, #0b1a2e);
+    --code-bg: light-dark(#f2f4f7, #0f1116);
+    --code-line: light-dark(#dde1e8, #2a2f3a);
+    --syn-kw: light-dark(#cf222e, #ff7b72); --syn-str: light-dark(#0a3069, #a5d6ff);
+    --syn-num: light-dark(#0550ae, #79c0ff); --syn-com: light-dark(#6e7781, #8b949e);
+    --syn-fn: light-dark(#8250df, #d2a8ff); --syn-type: light-dark(#953800, #ffa657);
+    --syn-attr: light-dark(#116329, #7ee787); --syn-built: light-dark(#953800, #ffa657);
+    --syn-lit: light-dark(#0550ae, #79c0ff); --syn-tag: light-dark(#116329, #7ee787);
+    --syn-meta: light-dark(#8250df, #d2a8ff);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+/* 顶栏 */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 10px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.title { font-size: 16px; font-weight: 600; margin: 0; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.btn-ghost {
+  border: 1px solid var(--line); background: transparent; color: var(--text);
+  border-radius: 8px; padding: 4px 12px; cursor: pointer; font-size: 13px;
+}
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 提示条 */
+.notice.warn {
+  margin: 10px auto 0; width: min(860px, calc(100% - 32px));
+  padding: 6px 12px; border-radius: 8px; font-size: 13px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.notice code { background: var(--panel-2); padding: 0 4px; border-radius: 4px; }
+
+/* 消息区 */
+.thread { flex: 1 1 auto; overflow-y: auto; }
+.list, .empty { max-width: 860px; margin: 0 auto; padding: 20px 16px 8px; }
+.bubble-row { display: flex; margin: 12px 0; }
+.bubble-row.user { justify-content: flex-end; }
+.bubble {
+  max-width: 82%; padding: 10px 14px; border-radius: var(--radius);
+  font-size: 15px; line-height: 1.6; word-break: break-word;
+}
+.bubble.user { background: var(--accent); color: var(--on-accent); border-bottom-right-radius: 4px; white-space: pre-wrap; }
+.bubble.assistant { background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.user-text { white-space: pre-wrap; }
+
+/* 状态灰字 + 错误 */
+.status-line {
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 12px; color: var(--text-2); margin-bottom: 6px;
+}
+.error-banner {
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err); border-radius: 8px; padding: 6px 10px; font-size: 13px; margin-bottom: 6px;
+}
+.caret {
+  display: inline-block; width: 7px; height: 1em; margin-left: 2px;
+  background: var(--accent); vertical-align: text-bottom;
+  animation: blink 1s steps(2, start) infinite;
+}
+@keyframes blink { to { visibility: hidden; } }
+
+/* markdown 正文 */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0.55em 0; }
+.md h1, .md h2, .md h3 { margin: 0.8em 0 0.4em; line-height: 1.3; }
+.md ul, .md ol { margin: 0.5em 0; padding-left: 1.5em; }
+.md a { color: var(--accent); }
+.md table { border-collapse: collapse; margin: 0.6em 0; font-size: 14px; display: block; overflow-x: auto; max-width: 100%; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+.md th { background: var(--panel-2); }
+:not(pre) > code {
+  background: var(--panel-2); border-radius: 4px; padding: 1px 6px; font-size: 0.9em;
+}
+
+/* 代码块 */
+.codeblock { margin: 0.6em 0; border: 1px solid var(--code-line); border-radius: 8px; overflow: hidden; }
+.codeblock-head {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--panel-2); padding: 2px 10px; font-size: 12px; color: var(--text-2);
+}
+.codeblock-lang { text-transform: lowercase; }
+.copy-btn {
+  border: 0; background: transparent; color: var(--text-2); cursor: pointer; font-size: 12px; padding: 4px;
+}
+.copy-btn:hover { color: var(--accent); }
+.codeblock pre { margin: 0; padding: 10px; overflow-x: auto; background: var(--code-bg); }
+.hljs { background: transparent; font-size: 13px; line-height: 1.5; }
+/* hljs token 双主题着色 */
+.hljs-comment, .hljs-quote { color: var(--syn-com); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal { color: var(--syn-kw); }
+.hljs-string, .hljs-regexp, .hljs-addition { color: var(--syn-str); }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: var(--syn-num); }
+.hljs-title, .hljs-function .hljs-title, .hljs-section { color: var(--syn-fn); }
+.hljs-type, .hljs-built_in, .hljs-builtin-name, .hljs-class .hljs-title { color: var(--syn-type); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable { color: var(--syn-attr); }
+.hljs-tag, .hljs-name, .hljs-selector-id, .hljs-selector-class, .hljs-selector-attr { color: var(--syn-tag); }
+.hljs-meta, .hljs-meta .hljs-keyword, .hljs-deletion { color: var(--syn-meta); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* 空态 / chips */
+.empty { text-align: center; padding-top: 14vh; }
+.empty-hello { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+.empty-tip { color: var(--text-2); font-size: 14px; max-width: 520px; margin: 0 auto; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 22px; }
+.chip {
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 输入区 */
+.composer {
+  flex: 0 0 auto; border-top: 1px solid var(--line); background: var(--panel);
+  padding: 10px 16px 14px;
+}
+.composer { max-width: 860px; width: 100%; margin: 0 auto; border-left: 0; border-right: 0; }
+.input {
+  width: 100%; min-height: 44px; max-height: 180px; resize: none;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text);
+  padding: 10px 12px; font: inherit; font-size: 15px; line-height: 1.5;
+}
+.input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 0; }
+.composer-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+.counter { font-size: 12px; color: var(--text-2); }
+.btn {
+  border: 0; border-radius: 8px; padding: 7px 18px; font-size: 14px; cursor: pointer; background: var(--accent); color: var(--on-accent);
+}
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* health 徽标 */
+.health-badge {
+  font-size: 12px; color: var(--text-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 10px; white-space: nowrap;
+}
+.health-badge.offline { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, transparent); }
