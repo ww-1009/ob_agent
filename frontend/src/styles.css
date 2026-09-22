@@ -49,7 +49,38 @@ body {
 }
 code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
-.app { display: flex; flex-direction: column; height: 100vh; }
+/* 外壳：左侧历史会话栏 + 右侧聊天列（未启用记忆时只有右列） */
+.app-shell { display: flex; height: 100vh; }
+.app { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; height: 100vh; }
+
+/* 历史会话侧栏 */
+.sidebar {
+  flex: 0 0 250px; display: flex; flex-direction: column;
+  background: var(--panel); border-right: 1px solid var(--line); overflow: hidden;
+}
+.sidebar-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.sidebar-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.sidebar-hint { margin: 0; padding: 12px; font-size: 13px; color: var(--text-2); }
+.sidebar-list { flex: 1 1 auto; list-style: none; margin: 0; padding: 6px; overflow-y: auto; }
+.sidebar-item { display: flex; align-items: center; gap: 4px; border-radius: 8px; }
+.sidebar-item:hover { background: var(--panel-2); }
+.sidebar-item.active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.sidebar-open {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 8px; border: 0; border-radius: 8px; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.sidebar-item-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-item-meta { font-size: 11px; color: var(--text-2); }
+.sidebar-delete {
+  flex: 0 0 auto; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-2); font-size: 16px; line-height: 1; cursor: pointer;
+}
+.sidebar-delete:hover { color: var(--err); background: var(--panel-2); }
+@media (max-width: 720px) { .sidebar { flex-basis: 180px; } }
 
 /* 顶栏 */
 .topbar {

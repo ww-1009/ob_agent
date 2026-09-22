@@ -18,6 +18,7 @@ The backend leverages langchain's `create_agent` under the hood to orchestrate t
 - [Configuration](#configuration)
   - [config.yaml Fields](#configyaml-fields)
   - [Configuration Priority](#configuration-priority)
+- [Conversation Memory (PostgreSQL)](#conversation-memory-postgresql)
 - [Deployment (Production)](#deployment-production)
   - [Overall Topology](#overall-topology)
   - [Step 0: Prepare Runtime Data (Important)](#step-0-prepare-runtime-data-important)
@@ -64,7 +65,9 @@ ob_agent/
 │   │   │   └── tool_input.py # Tool input Pydantic models
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat (SSE) · GET /api/health
-│   │   │   └── confirm.py    # POST /api/chat/confirm (Approval back-channel)
+│   │   │   ├── confirm.py    # POST /api/chat/confirm (Approval back-channel)
+│   │   │   └── threads.py    # GET /api/threads · GET/DELETE /api/threads/{id}
+│   │   ├── memory/           # Conversation memory: PG checkpointer + chat_message store
 │   │   └── tools/            # Dual-adapter implementation
 │   │       ├── base.py       # Data models / Exceptions / Protocol interfaces
 │   │       ├── ocp/          # OCP client: mock.py (fixtures) / real.py (httpx)
@@ -119,7 +122,7 @@ curl -s http://127.0.0.1:8000/api/health
 Expected output (Mock default, LLM unconfigured):
 
 ```json
-{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false}
+{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false,"memory_enabled":false}
 ```
 
 Chat example (SSE streaming; returns a clear 503 error if LLM is not configured):
@@ -129,6 +132,8 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
   -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"有哪些慢SQL？"}]}'
 ```
+
+> With conversation memory enabled (`memory.enabled: true`) this same request must also carry a `thread_id`; see [Conversation Memory (PostgreSQL)](#conversation-memory-postgresql).
 
 > When LLM is not configured, the service starts as usual, and `/api/chat` returns a 503 advising you to complete the LLM configuration. Offline end-to-end validation is completed by injecting a stub model (`tests/helpers/scripted_model.py`), without relying on a real LLM.
 
@@ -174,8 +179,12 @@ cp backend/.env.example backend/.env
 | `agent`   | `confirm_db_ops`                                         | Whether to enable human approval for `execute_sql` (HITL) |
 | `agent`   | `confirm_timeout_seconds`                                | Approval timeout (Defaults to rejection on timeout) |
 | `agent`   | `recursion_limit`                                        | Maximum recursion steps for langgraph           |
+| `memory`  | `enabled`                                                | Persist conversations to PostgreSQL (`true` when PG is available) |
+| `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PostgreSQL connection; set `dsn` to override the individual parts |
+| `memory`  | `pool_min_size` / `pool_max_size`                        | Connection pool bounds (shared by checkpointer and history table) |
+| `memory`  | `list_limit` / `messages_limit`                          | Default page caps for the thread-list / history endpoints |
 
-Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`).
+Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`).
 
 ### Configuration Priority
 
@@ -184,6 +193,37 @@ Environment Variables (non-empty) > backend/config.yaml > Code Defaults
 ```
 
 When LLM is not configured: backend starts normally, `/api/chat` returns `503`; `llm_configured` in `/api/health` shows `false`.
+
+---
+
+## Conversation Memory (PostgreSQL)
+
+When `memory.enabled` is `true`, conversations are persisted so the agent remembers earlier turns and the frontend can browse history. Two stores share **one** PostgreSQL connection pool:
+
+| Store | Role |
+| --- | --- |
+| LangGraph checkpoint (`AsyncPostgresSaver`, keyed by `thread_id`) | The agent state the LLM sees — this **is** the short-term memory. `setup()` creates `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` on first start. |
+| `chat_message` (created by the backend) | The user/assistant transcript that powers the history UI. It is separate because `SummarizationMiddleware` rewrites checkpoint state once the context window fills up, which would silently drop early turns from the checkpoint. |
+
+**Request contract change**: when memory is enabled, `POST /api/chat` requires `thread_id` and only the **last** message is treated as the new turn (earlier turns come from the checkpoint). The frontend generates a `thread_id` per conversation and remembers it in `localStorage`. With `memory.enabled: false` the old stateless contract applies: the client sends the full history and no `thread_id` is needed.
+
+```bash
+# First turn on a new conversation (later turns reuse the same thread_id)
+curl -N -X POST http://127.0.0.1:8000/api/chat \
+  -H 'content-type: application/json' \
+  -d '{"thread_id":"demo-1","messages":[{"role":"user","content":"有哪些慢SQL？"}]}'
+
+# History browsing
+curl -s http://127.0.0.1:8000/api/threads
+curl -s http://127.0.0.1:8000/api/threads/demo-1/messages
+curl -X DELETE http://127.0.0.1:8000/api/threads/demo-1
+```
+
+`GET /api/threads` returns `{thread_id, title, created_at, updated_at, message_count}` (title = first user message, truncated). `DELETE` removes both the `chat_message` rows and the thread's checkpoints.
+
+**Prerequisites**: a reachable PostgreSQL database and a role allowed to create tables in `public` (the checkpointer creates its own tables on first start). `AsyncPostgresSaver.setup()` is idempotent; with multiple uvicorn workers a concurrent first start may log a migration conflict, which is handled by treating already-created tables as ready.
+
+**Degraded mode**: if PostgreSQL is unreachable, or `memory.enabled: false`, the backend still starts normally. `/api/threads*` returns `503`, `GET /api/health` reports `memory_enabled: false`, and the frontend hides the history sidebar and falls back to sending the full history on every request.
 
 ---
 
@@ -212,6 +252,7 @@ The following data **is not distributed via git** (excluded by `.gitignore`) and
 
 1. **`backend/config.yaml`** and **`backend/.env`**: Generate and populate with actual values according to [Configuration](#configuration).
 2. **`backend/ob_wiki/`**: OceanBase official documentation knowledge base directory. The System Prompt expects the documentation entry point at `./ob_wiki/README.md`, which the agent references in read-only mode using file tools (restricted to this directory root). **Missing this directory will cause document retrieval features to fail**.
+3. **PostgreSQL** (only when `memory.enabled: true`): a reachable instance plus a role allowed to create tables in `public`. The backend creates its own checkpoint and history tables on first start. See [Conversation Memory (PostgreSQL)](#conversation-memory-postgresql).
 
 > Working directory convention: The backend runs with `backend/` as its working directory (`run.sh` will `cd` to the script directory), ensuring relative paths like `./ob_wiki` and `./config.yaml` work properly.
 
@@ -256,6 +297,7 @@ The frontend initiates requests using relative paths:
 - `POST /api/chat` (SSE streaming conversation)
 - `POST /api/chat/confirm` (Approval back-channel)
 - `GET /api/health` (Health check)
+- `GET /api/threads` · `GET`/`DELETE /api/threads/{thread_id}/messages` (Conversation history; 503 when memory is disabled)
 
 The reverse proxy MUST:
 1. Return static assets (HTML/JS/CSS, etc.) from `frontend/dist`.

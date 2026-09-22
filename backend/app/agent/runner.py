@@ -14,7 +14,7 @@ from typing import AsyncIterator, Dict, List, Mapping
 
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
@@ -68,6 +68,8 @@ async def stream_chat(
     tools: List[BaseTool],
     messages: List[BaseMessage],
     *,
+    thread_id: str | None = None,
+    checkpointer=None,
     max_seconds: int = 120,
     broker=None,
     confirm_enabled: bool = True,
@@ -75,6 +77,10 @@ async def stream_chat(
     recursion_limit: int = 100,
 ) -> AsyncIterator[dict]:
     """对历史消息运行 agent，产出对外事件流。单轮超时兜底（spec §8.4）。
+
+    thread_id + checkpointer 同时在场时启用会话记忆：本轮 messages 只应包含「新消息」，
+    历史由 langgraph 依据 thread_id 从检查点加载并追加（add_messages 语义）；
+    二者缺一时按无状态处理，此时 messages 需包含完整历史。
 
     max_seconds 只约束 agent 执行（生产者），不因消费端停顿/背压而误中止。
 
@@ -100,9 +106,6 @@ async def stream_chat(
         trigger=trig,
         keep=keep,
     )
-    full: List[BaseMessage] = [SystemMessage(system_prompt(now=datetime.now()))]
-    full.extend(messages)
-
     q: asyncio.Queue = asyncio.Queue()
 
     async def _produce() -> None:
@@ -117,16 +120,23 @@ async def stream_chat(
         agent: Runnable = create_agent(
             model=model,
             tools=tools,
+            system_prompt=system_prompt(now=datetime.now()),
             middleware=[confirm_mw, summarization],
+            checkpointer=checkpointer,
         )
+        # 有检查点且给了 thread_id：messages 只含本轮新消息，历史由 langgraph
+        # 从该 thread 的状态加载（messages 通道是 add_messages 追加语义）。
+        run_config: dict = {"recursion_limit": recursion_limit}
+        if checkpointer is not None and thread_id:
+            run_config["configurable"] = {"thread_id": thread_id}
         try:
             async with asyncio.timeout(max_seconds):
                 # create_agent 返回的是编译后的状态图，输入需按 {"messages": [...]} 传。
                 # 显式注入 recursion_limit：langgraph 运行时 config 会覆盖编译默认，
                 # 从而规避不同 langgraph 版本的默认差异（旧版默认 25，新版 create_agent 内部写 9999）。
                 async for event in agent.astream_events(
-                    {"messages": full},
-                    config={"recursion_limit": recursion_limit},
+                    {"messages": messages},
+                    config=run_config,
                     version="v2",
                 ):
                     user = classify_agent_event(event)

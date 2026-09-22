@@ -1,7 +1,10 @@
 import { computed, reactive, ref } from 'vue'
 import { ChatHttpError, postChat } from '../api/chat.js'
 import { ConfirmHttpError, postConfirm } from '../api/confirm.js'
-import { buildHistory, dedupeStatus } from './chatCore.js'
+import { fetchHealth } from '../api/health.js'
+import { deleteThread, fetchThreadMessages, listThreads, ThreadsHttpError } from '../api/threads.js'
+import { buildHistory, dedupeStatus, toMessageView } from './chatCore.js'
+import { loadThreadId, newThreadId, saveThreadId } from '../lib/threadId.js'
 
 let seq = 0
 const nextId = () => `m${++seq}`
@@ -12,11 +15,86 @@ export function useChat() {
   const llmNotConfigured = ref(false)
   // 待审批请求：{request_id, tool, tool_label, args, expires_in, state:'idle'|'deciding', error}
   const pendingConfirm = ref(null)
+  // 会话记忆（后端 PG 持久化）：memoryEnabled 为 false 时退回「前端持有全量历史」的无状态模式
+  const memoryEnabled = ref(false)
+  const threadId = ref('')
+  const threads = ref([]) // [{thread_id, title, created_at, updated_at, message_count}]
+  const loadingThread = ref(false)
   let controller = null
   let sendSeq = 0 // latest-wins 令牌：与 busy/controller 同实例作用域；super-send 后旧流 finally 不误清新流共享态
 
   function mkAssistant() {
     return { id: nextId(), role: 'assistant', content: '', status: [], state: 'streaming', error: '' }
+  }
+
+  function applyHistory(items) {
+    messages.value = toMessageView(items).map((m) => ({ id: nextId(), ...m }))
+  }
+
+  /** 会话列表：503 说明服务端记忆关闭，顺势退回无状态模式。 */
+  async function refreshThreads() {
+    if (!memoryEnabled.value) return
+    try {
+      threads.value = await listThreads()
+    } catch (err) {
+      if (err instanceof ThreadsHttpError && err.status === 503) memoryEnabled.value = false
+    }
+  }
+
+  async function loadThreadMessages(id) {
+    if (!id) return
+    loadingThread.value = true
+    try {
+      applyHistory(await fetchThreadMessages(id))
+    } catch (err) {
+      // 历史加载失败不阻塞对话：保持当前视图（本地记录的会话可能已被删除）
+      if (err instanceof ThreadsHttpError && err.status === 503) memoryEnabled.value = false
+    } finally {
+      loadingThread.value = false
+    }
+  }
+
+  /** 启动时对齐服务端能力：记忆开启则恢复上次会话（localStorage）与列表。 */
+  async function init() {
+    const health = await fetchHealth()
+    memoryEnabled.value = !!(health && health.memory_enabled)
+    if (!memoryEnabled.value) return
+    threadId.value = loadThreadId() || newThreadId()
+    saveThreadId(threadId.value)
+    await Promise.all([refreshThreads(), loadThreadMessages(threadId.value)])
+  }
+
+  async function openThread(id) {
+    if (!id) return
+    stop()
+    pendingConfirm.value = null
+    llmNotConfigured.value = false
+    threadId.value = id
+    saveThreadId(id)
+    messages.value = []
+    await loadThreadMessages(id)
+  }
+
+  function newThread() {
+    stop()
+    messages.value = []
+    pendingConfirm.value = null
+    llmNotConfigured.value = false
+    if (memoryEnabled.value) {
+      threadId.value = newThreadId()
+      saveThreadId(threadId.value)
+    }
+  }
+
+  async function removeThread(id) {
+    if (!id) return
+    try {
+      await deleteThread(id)
+    } catch {
+      /* 删除失败：保持列表原状，仅刷新 */
+    }
+    if (id === threadId.value) newThread()
+    await refreshThreads()
   }
 
   async function send(text) {
@@ -31,7 +109,11 @@ export function useChat() {
     pendingConfirm.value = null
     controller = new AbortController()
     const mySend = ++sendSeq // 本流令牌：finally 里只有最新 send 才允许复位共享态
-    const history = buildHistory(messages.value)
+    // 无记忆：需回传完整历史；有记忆：只传本轮消息，历史由服务端检查点提供
+    const useMemory = memoryEnabled.value && !!threadId.value
+    const payload = useMemory
+      ? [{ role: 'user', content: q }]
+      : buildHistory(messages.value)
     // rAF 节流：同一帧内多个 delta 合并为一次 content 变更，避免逐 chunk 重渲染 markdown
     let rafId = 0
     let pending = ''
@@ -47,7 +129,8 @@ export function useChat() {
     }
     try {
       await postChat({
-        messages: history,
+        messages: payload,
+        threadId: useMemory ? threadId.value : undefined,
         signal: controller.signal,
         onEvent: (ev) => {
           if (ev.type === 'status') {
@@ -102,6 +185,8 @@ export function useChat() {
         busy.value = false
         controller = null
       }
+      // 后端在 done 之前已落库，这里刷新即可看到新会话/标题/计数
+      if (useMemory) void refreshThreads()
     }
   }
 
@@ -144,13 +229,15 @@ export function useChat() {
   }
 
   function clear() {
-    stop()
-    messages.value = []
-    llmNotConfigured.value = false
-    pendingConfirm.value = null
+    newThread()
   }
 
   const canSend = computed(() => !busy.value)
 
-  return { messages, busy, canSend, llmNotConfigured, pendingConfirm, send, stop, clear, decideConfirm }
+  return {
+    messages, busy, canSend, llmNotConfigured, pendingConfirm,
+    memoryEnabled, threadId, threads, loadingThread,
+    send, stop, clear, decideConfirm,
+    init, openThread, newThread, removeThread, refreshThreads,
+  }
 }

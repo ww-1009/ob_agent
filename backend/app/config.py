@@ -78,12 +78,51 @@ class AgentConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """会话记忆持久化（PostgreSQL / LangGraph 检查点）。
+
+    enabled 为 false 或连接失败时，后端退回无状态模式（前端回传全量历史）。
+    """
+
+    enabled: bool = False
+    # dsn 非空则优先；否则由 host/port/user/password/dbname 拼装
+    dsn: str = ""
+    host: str = "127.0.0.1"
+    port: int = 5432
+    user: str = ""
+    password: str = ""
+    dbname: str = ""
+    pool_min_size: int = 1
+    pool_max_size: int = 5
+    list_limit: int = 50       # GET /api/threads 默认上限
+    messages_limit: int = 500  # GET /api/threads/{id}/messages 默认上限
+
+    def build_dsn(self) -> str:
+        """拼装连接串；分项拼装交给 psycopg 处理转义（避免手写 URL 编码出错）。"""
+        if self.dsn.strip():
+            return self.dsn.strip()
+        if not self.dbname.strip():
+            raise ValueError("memory 未配置完整：缺少 dbname（或直接给 memory.dsn）")
+        # 延迟导入：未安装 psycopg 时仍可 import 本模块（记忆关闭场景不硬依赖）
+        from psycopg.conninfo import make_conninfo
+
+        return make_conninfo(
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            dbname=self.dbname,
+        )
+
+
+@dataclass
 class Settings:
     ocp: OcpConfig = field(default_factory=OcpConfig)
     sql_ro: SqlConfig = field(default_factory=SqlConfig)
     meta_db: SqlConfig = field(default_factory=SqlConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 def _default_config_path() -> Path:
@@ -132,9 +171,11 @@ def load_settings(
     meta_db_y = data.get("meta_db", {}) or {}
     llm_y = data.get("llm", {}) or {}
     agent_y = data.get("agent", {}) or {}
+    memory_y = data.get("memory", {}) or {}
 
     verify_ssl_env = _env_nonempty(env, "OCP_VERIFY_SSL")
     send_row_data_env = _env_nonempty(env, "SEND_ROW_DATA")
+    memory_enabled_env = _env_nonempty(env, "MEMORY_ENABLED")
 
     return Settings(
         ocp=OcpConfig(
@@ -190,5 +231,21 @@ def load_settings(
             recursion_limit=int(
                 _env_nonempty(env, "RECURSION_LIMIT") or agent_y.get("recursion_limit", 100)
             ),
+        ),
+        memory=MemoryConfig(
+            enabled=_as_bool(
+                memory_enabled_env if memory_enabled_env is not None else memory_y.get("enabled"),
+                False,
+            ),
+            dsn=_env_nonempty(env, "MEMORY_DSN") or memory_y.get("dsn", ""),
+            host=_env_nonempty(env, "MEMORY_HOST") or memory_y.get("host", "127.0.0.1"),
+            port=int(_env_nonempty(env, "MEMORY_PORT") or memory_y.get("port", 5432)),
+            user=_env_nonempty(env, "MEMORY_USER") or memory_y.get("user", ""),
+            password=_env_nonempty(env, "MEMORY_PASSWORD") or memory_y.get("password", ""),
+            dbname=_env_nonempty(env, "MEMORY_DBNAME") or memory_y.get("dbname", ""),
+            pool_min_size=int(memory_y.get("pool_min_size", 1)),
+            pool_max_size=int(memory_y.get("pool_max_size", 5)),
+            list_limit=int(memory_y.get("list_limit", 50)),
+            messages_limit=int(memory_y.get("messages_limit", 500)),
         ),
     )

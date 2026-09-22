@@ -19,6 +19,7 @@ OCP（OceanBase 管控平台）元数据与只读 SQL，并以 **SSE 流式**返
 - [配置说明](#配置说明)
   - [config.yaml 字段](#configyaml-字段)
   - [配置优先级](#配置优先级)
+- [会话记忆（PostgreSQL）](#会话记忆postgresql)
 - [部署（生产环境）](#部署生产环境)
   - [整体拓扑](#整体拓扑)
   - [第 0 步：准备运行时数据（重要）](#第-0-步准备运行时数据重要)
@@ -65,7 +66,9 @@ ob_agent/
 │   │   │   └── tool_input.py # 工具入参 Pydantic 模型
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
-│   │   │   └── confirm.py    # POST /api/chat/confirm（审批反向通道）
+│   │   │   ├── confirm.py    # POST /api/chat/confirm（审批反向通道）
+│   │   │   └── threads.py    # GET /api/threads · GET/DELETE /api/threads/{id}
+│   │   ├── memory/           # 会话记忆：PG 检查点 + chat_message 历史表
 │   │   └── tools/            # 双适配器实现
 │   │       ├── base.py       # 数据模型 / 异常 / 协议接口
 │   │       ├── ocp/          # OCP 客户端：mock.py（fixtures）/ real.py（httpx）
@@ -122,7 +125,7 @@ curl -s http://127.0.0.1:8000/api/health
 预期输出（mock 默认、未配置 LLM）：
 
 ```json
-{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false}
+{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false,"memory_enabled":false}
 ```
 
 聊天示例（SSE 流式；未配置 LLM 时返回 503 清晰提示）：
@@ -132,6 +135,8 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
   -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"有哪些慢SQL？"}]}'
 ```
+
+> 启用会话记忆（`memory.enabled: true`）时，同一请求还需带上 `thread_id`，见[会话记忆（PostgreSQL）](#会话记忆postgresql)。
 
 > 未配置 LLM 时服务照常启动，`/api/chat` 返回 503 提示填写 LLM 配置；离线端到端验证由注入
 > stub 模型（`tests/helpers/scripted_model.py`）完成，不依赖真实 LLM。
@@ -181,8 +186,12 @@ cp backend/.env.example backend/.env
 | `agent`   | `confirm_db_ops`                                         | 是否开启 `execute_sql` 人工审批（HITL）                   |
 | `agent`   | `confirm_timeout_seconds`                                | 审批超时（超时默认拒绝）                                    |
 | `agent`   | `recursion_limit`                                        | langgraph 图最大递归步数                               |
+| `memory`  | `enabled`                                                | 是否把会话持久化到 PostgreSQL（PG 可用时置 `true`）              |
+| `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PG 连接信息；给 `dsn` 可整体覆盖分项                          |
+| `memory`  | `pool_min_size` / `pool_max_size`                        | 连接池上下限（检查点与历史表共用一个池）                             |
+| `memory`  | `list_limit` / `messages_limit`                          | 会话列表 / 历史消息接口的默认条数上限                            |
 
-环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`）。
+环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`、`MEMORY_ENABLED`、`MEMORY_DSN`、`MEMORY_HOST`、`MEMORY_PASSWORD`）。
 
 ### 配置优先级
 
@@ -191,6 +200,37 @@ cp backend/.env.example backend/.env
 ```
 
 未配置 LLM 时：后端照常启动，`/api/chat` 返回 `503`；`/api/health` 的 `llm_configured` 为 `false`。
+
+---
+
+## 会话记忆（PostgreSQL）
+
+`memory.enabled: true` 时会话会被持久化：Agent 能记住前几轮对话，前端也能浏览历史。同一套 PostgreSQL 连接池上放两个存储：
+
+| 存储 | 作用 |
+| --- | --- |
+| LangGraph 检查点（`AsyncPostgresSaver`，按 `thread_id` 索引） | 模型看到的 Agent 状态，**就是**短期记忆本身。首次启动 `setup()` 会建 `checkpoints`、`checkpoint_blobs`、`checkpoint_writes`、`checkpoint_migrations`。 |
+| `chat_message`（后端自建） | 前端历史界面用的 user/assistant 终稿记录。之所以单独存：上下文写满后 `SummarizationMiddleware` 会改写检查点里的消息，早期对话会从检查点中消失。 |
+
+**请求契约变化**：启用记忆后 `POST /api/chat` 必须带 `thread_id`，且**只把 `messages` 的最后一条当本轮新消息**（更早的轮次由检查点提供）。前端为每个会话生成 `thread_id` 并记在 `localStorage`。`memory.enabled: false` 时沿用旧的无状态契约：前端回传全量历史，不需要 `thread_id`。
+
+```bash
+# 新会话第一轮（后续轮次复用同一个 thread_id）
+curl -N -X POST http://127.0.0.1:8000/api/chat \
+  -H 'content-type: application/json' \
+  -d '{"thread_id":"demo-1","messages":[{"role":"user","content":"有哪些慢SQL？"}]}'
+
+# 历史浏览
+curl -s http://127.0.0.1:8000/api/threads
+curl -s http://127.0.0.1:8000/api/threads/demo-1/messages
+curl -X DELETE http://127.0.0.1:8000/api/threads/demo-1
+```
+
+`GET /api/threads` 返回 `{thread_id, title, created_at, updated_at, message_count}`（标题取首条用户提问并截断）。`DELETE` 会同时删除 `chat_message` 行与该 thread 的检查点。
+
+**前置条件**：PG 可达，且账号能在 `public` 下建表（检查点首次启动自行建表）。`AsyncPostgresSaver.setup()` 幂等；多 worker 并发首次启动可能报迁移冲突，已按「表已存在即视为就绪」处理。
+
+**降级行为**：PG 连不上或 `memory.enabled: false` 时，后端照常启动：`/api/threads*` 返回 `503`，`GET /api/health` 报 `memory_enabled: false`，前端隐藏历史侧栏并退回「每轮回传全量历史」的无状态模式。
 
 ---
 
@@ -223,6 +263,7 @@ cp backend/.env.example backend/.env
 1. **`backend/config.yaml`** 与 **`backend/.env`**：按[配置说明](#配置说明)生成并填写真实值。
 2. **`backend/ob_wiki/`**：OceanBase 官方文档知识库目录。System Prompt 约定文档入口为
    `./ob_wiki/README.md`，agent 通过文件工具（根目录限定在该目录）只读引用。**缺少该目录会导致文档检索功能不可用**。
+3. **PostgreSQL**（仅当 `memory.enabled: true`）：可连的实例 + 能在 `public` 下建表的账号。检查点与历史表由后端首次启动时自建，见[会话记忆（PostgreSQL）](#会话记忆postgresql)。
 
 > 运行目录约定：后端以 `backend/` 为工作目录运行（`run.sh` 会 `cd` 到脚本所在目录），
 > 使 `./ob_wiki`、`./config.yaml`的相对路径生效。
@@ -269,6 +310,7 @@ npm run build     # 产物输出到 frontend/dist/
 - `POST /api/chat`（SSE 流式对话）
 - `POST /api/chat/confirm`（审批反向通道）
 - `GET /api/health`（健康检查）
+- `GET /api/threads` · `GET`/`DELETE /api/threads/{thread_id}/messages`（历史会话；记忆未启用时返回 503）
 
 反向代理必须：
 1. 把静态资源（HTML/JS/CSS 等）从 `frontend/dist` 返回。
