@@ -116,6 +116,17 @@ class MemoryConfig:
 
 
 @dataclass
+class AuthConfig:
+    """访问控制（最小方案）：静态 Bearer 令牌保护除 /api/health 外的所有 /api 路由。
+
+    enabled=true 而 token 为空时启动直接失败（fail closed），避免「以为开了其实没开」。
+    """
+
+    enabled: bool = False
+    token: str = ""
+
+
+@dataclass
 class Settings:
     ocp: OcpConfig = field(default_factory=OcpConfig)
     sql_ro: SqlConfig = field(default_factory=SqlConfig)
@@ -123,6 +134,7 @@ class Settings:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
 
 
 def _default_config_path() -> Path:
@@ -172,6 +184,7 @@ def load_settings(
     llm_y = data.get("llm", {}) or {}
     agent_y = data.get("agent", {}) or {}
     memory_y = data.get("memory", {}) or {}
+    auth_y = data.get("auth", {}) or {}
 
     verify_ssl_env = _env_nonempty(env, "OCP_VERIFY_SSL")
     send_row_data_env = _env_nonempty(env, "SEND_ROW_DATA")
@@ -247,5 +260,14 @@ def load_settings(
             pool_max_size=int(memory_y.get("pool_max_size", 5)),
             list_limit=int(memory_y.get("list_limit", 50)),
             messages_limit=int(memory_y.get("messages_limit", 500)),
+        ),
+        auth=AuthConfig(
+            enabled=_as_bool(
+                _env_nonempty(env, "AUTH_ENABLED")
+                if _env_nonempty(env, "AUTH_ENABLED") is not None
+                else auth_y.get("enabled"),
+                False,
+            ),
+            token=_env_nonempty(env, "AUTH_TOKEN") or auth_y.get("token", ""),
         ),
     )

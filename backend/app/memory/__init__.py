@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from app.config import MemoryConfig
+from app.memory.audit import AuditStore
 from app.memory.store import ChatMessageStore
 
 if TYPE_CHECKING:  # 仅类型标注：运行期按需导入，未安装依赖时本模块仍可导入
@@ -32,6 +33,7 @@ class MemoryRuntime:
     pool: AsyncConnectionPool
     checkpointer: "AsyncPostgresSaver"
     store: ChatMessageStore
+    audit: AuditStore
 
     async def aclose(self) -> None:
         await self.pool.close()
@@ -83,6 +85,8 @@ async def open_memory(cfg: MemoryConfig) -> Optional[MemoryRuntime]:
     store = ChatMessageStore(pool)
     try:
         await store.ensure_schema()
+        audit = AuditStore(pool)
+        await audit.ensure_schema()
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
         # 必须在运行中的事件循环里构造（内部会取 running loop）
@@ -102,5 +106,5 @@ async def open_memory(cfg: MemoryConfig) -> Optional[MemoryRuntime]:
             pass
         return None
 
-    logger.info("会话记忆已启用（thread 级检查点 + chat_message 历史表）")
-    return MemoryRuntime(pool=pool, checkpointer=saver, store=store)
+    logger.info("会话记忆已启用（thread 级检查点 + chat_message 历史表 + audit_event 审计表）")
+    return MemoryRuntime(pool=pool, checkpointer=saver, store=store, audit=audit)

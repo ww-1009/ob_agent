@@ -20,6 +20,7 @@ OCP（OceanBase 管控平台）元数据与只读 SQL，并以 **SSE 流式**返
   - [config.yaml 字段](#configyaml-字段)
   - [配置优先级](#配置优先级)
 - [会话记忆（PostgreSQL）](#会话记忆postgresql)
+- [工具轨迹、审计与访问控制](#工具轨迹审计与访问控制)
 - [部署（生产环境）](#部署生产环境)
   - [整体拓扑](#整体拓扑)
   - [第 0 步：准备运行时数据（重要）](#第-0-步准备运行时数据重要)
@@ -67,8 +68,10 @@ ob_agent/
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
 │   │   │   ├── confirm.py    # POST /api/chat/confirm（审批反向通道）
-│   │   │   └── threads.py    # GET /api/threads · GET/DELETE /api/threads/{id}
-│   │   ├── memory/           # 会话记忆：PG 检查点 + chat_message 历史表
+│   │   │   ├── threads.py    # GET /api/threads · GET/DELETE /api/threads/{id}
+│   │   │   ├── audit.py      # GET /api/audit（工具调用审计）
+│   │   │   └── deps.py       # 共享依赖：Bearer 令牌 / 记忆可用性 / thread_id 校验
+│   │   ├── memory/           # PG 检查点 + chat_message 历史表 + audit_event 审计表
 │   │   └── tools/            # 双适配器实现
 │   │       ├── base.py       # 数据模型 / 异常 / 协议接口
 │   │       ├── ocp/          # OCP 客户端：mock.py（fixtures）/ real.py（httpx）
@@ -192,8 +195,10 @@ cp backend/.env.example backend/.env
 | `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PG 连接信息；给 `dsn` 可整体覆盖分项                          |
 | `memory`  | `pool_min_size` / `pool_max_size`                        | 连接池上下限（检查点与历史表共用一个池）                             |
 | `memory`  | `list_limit` / `messages_limit`                          | 会话列表 / 历史消息接口的默认条数上限                            |
+| `auth`    | `enabled`                                                | 除 `/api/health` 外所有 `/api/*` 要求 `Authorization: Bearer <token>` |
+| `auth`    | `token`                                                  | 共享令牌；`enabled: true` 而令牌为空会导致启动失败（fail closed）    |
 
-环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`、`MEMORY_ENABLED`、`MEMORY_DSN`、`MEMORY_HOST`、`MEMORY_PASSWORD`）。
+环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`、`MEMORY_ENABLED`、`MEMORY_DSN`、`MEMORY_HOST`、`MEMORY_PASSWORD`、`AUTH_ENABLED`、`AUTH_TOKEN`）。
 
 ### 配置优先级
 
@@ -233,6 +238,43 @@ curl -X DELETE http://127.0.0.1:8000/api/threads/demo-1
 **前置条件**：PG 可达，且账号能在 `public` 下建表（检查点首次启动自行建表）。`AsyncPostgresSaver.setup()` 幂等；多 worker 并发首次启动可能报迁移冲突，已按「表已存在即视为就绪」处理。
 
 **降级行为**：PG 连不上或 `memory.enabled: false` 时，后端照常启动：`/api/threads*` 返回 `503`，`GET /api/health` 报 `memory_enabled: false`，前端隐藏历史侧栏并退回「每轮回传全量历史」的无状态模式。
+
+---
+
+## 工具轨迹、审计与访问控制
+
+### 工具轨迹（tool trace）
+
+每次工具调用结束时都会通过 SSE 发出一条 `tool` 事件：
+
+```json
+{"type":"tool","phase":"end","id":"01a0ca10","name":"execute_sql","label":"执行只读 SQL",
+ "args":{"sql":"select ..."},"ok":true,"error":null,"rows":200,"truncated":true,
+ "approved":true,"duration_ms":842}
+```
+
+字符串入参（SQL 文本）截断到 500 字符，且**绝不包含结果行数据**——只带调用元信息。前端把它渲染成答案下方的折叠列表，让诊断结论可以**被核对**而不是被信任。原有 `status` 事件保持不变，旧客户端不受影响。
+
+`approved` 只对受人工审批管控的工具（`execute_sql`）取 `true`/`false`，其余为 `null`。被拒绝或审批超时的调用根本不会进入工具 handler，因此不会有 `on_tool_end`——由确认中间件自己补发 `tool` 事件，这也是**被拒绝的操作**同样会出现在轨迹里的原因。
+
+### 审计日志
+
+启用记忆后，每条 tool 事件都会落库到 `audit_event`（与检查点同池）：thread、工具、入参、成败、行数、是否截断、是否被批准、耗时。
+
+```bash
+curl -s "http://127.0.0.1:8000/api/audit?limit=20"
+curl -s "http://127.0.0.1:8000/api/audit?thread_id=demo-1&tool=execute_sql"
+```
+
+前端通过顶栏的**工具审计**按钮查看同样的数据（可切换「仅本会话 / 全部会话」）。审计表**有意保存 SQL 文本**（这正是它的用途），但从不保存结果行数据。审计复用记忆连接池，故记忆不可用时 `/api/audit` 返回 `503`，而 SSE 上的工具轨迹仍照常工作。
+
+审计留痕只增不改：`DELETE /api/threads/{thread_id}` 会删掉会话的消息与检查点，但**有意保留其审计行**，因此删除会话无法抹掉「某次查询被执行过」这一记录。
+
+### 访问控制
+
+最小方案：单令牌。设置 `auth.enabled: true` 与 `auth.token`（或环境变量 `AUTH_ENABLED` / `AUTH_TOKEN`），此后除 `/api/health` 外所有 `/api/*` 都要求 `Authorization: Bearer <token>`；`/api/health` 保持放行以便探活。前端把令牌存在 `localStorage`，收到 `401` 时弹一次性输入框——不引入登录页，也不引入用户账号。`auth.enabled: true` 而令牌为空时后端**启动即失败**（fail closed）。
+
+> 由于会话现在会被持久化，未加保护的部署意味着任何能访问该端口的人都能读取、删除全部会话，**并**对你的集群触发只读 SQL。除非端口已限定在可信网络内，请开启令牌。
 
 ---
 
@@ -312,7 +354,8 @@ npm run build     # 产物输出到 frontend/dist/
 - `POST /api/chat`（SSE 流式对话）
 - `POST /api/chat/confirm`（审批反向通道）
 - `GET /api/health`（健康检查）
-- `GET /api/threads` · `GET`/`DELETE /api/threads/{thread_id}/messages`（历史会话；记忆未启用时返回 503）
+- `GET /api/threads` · `GET /api/threads/{thread_id}/messages` · `DELETE /api/threads/{thread_id}`（历史会话；记忆未启用时返回 503）
+- `GET /api/audit`（工具调用审计；记忆未启用时返回 503）
 
 反向代理必须：
 1. 把静态资源（HTML/JS/CSS 等）从 `frontend/dist` 返回。

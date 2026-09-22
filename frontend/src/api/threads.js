@@ -1,6 +1,8 @@
 // 会话历史接口：列出会话 / 读取历史 / 删除会话。
 // 后端 memory 未启用时返回 503。
 
+import { authedFetch } from '../lib/auth.js'
+
 export class ThreadsHttpError extends Error {
   constructor(status, detail) {
     super(detail || `HTTP ${status}`)
@@ -24,17 +26,17 @@ async function jsonOrThrow(resp) {
 }
 
 export async function listThreads() {
-  const data = await jsonOrThrow(await fetch('/api/threads'))
+  const data = await jsonOrThrow(await authedFetch('/api/threads'))
   return Array.isArray(data.items) ? data.items : []
 }
 
 export async function fetchThreadMessages(threadId) {
   const path = `/api/threads/${encodeURIComponent(threadId)}/messages`
-  const data = await jsonOrThrow(await fetch(path))
+  const data = await jsonOrThrow(await authedFetch(path))
   return Array.isArray(data.items) ? data.items : []
 }
 
 export async function deleteThread(threadId) {
   const path = `/api/threads/${encodeURIComponent(threadId)}`
-  return jsonOrThrow(await fetch(path, { method: 'DELETE' }))
+  return jsonOrThrow(await authedFetch(path, { method: 'DELETE' }))
 }

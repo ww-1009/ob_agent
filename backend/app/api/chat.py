@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import AsyncIterator, List, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,14 +11,14 @@ from pydantic import BaseModel, Field
 
 from app.agent.confirm import ConfirmationBroker
 from app.agent.runner import stream_chat
+from app.api.deps import checked_thread_id
 from app.sse import sse_frame
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# 会话 ID 白名单：同时用作 chat_message.thread_id 与检查点 thread_id
-THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 健康检查单独成 router：探活需要免令牌，故在 main 中以不同依赖挂载
+health_router = APIRouter()
 
 
 class ChatMessage(BaseModel):
@@ -41,15 +40,6 @@ def _to_langchain(messages: List[ChatMessage]) -> List[BaseMessage]:
     ]
 
 
-def _checked_thread_id(thread_id: str | None) -> str:
-    if not thread_id or not THREAD_ID_RE.match(thread_id):
-        raise HTTPException(
-            status_code=422,
-            detail="启用会话记忆时 thread_id 必填，且只允许字母、数字、下划线、连字符（长度 1-64）",
-        )
-    return thread_id
-
-
 @router.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
     state = request.app.state
@@ -67,7 +57,7 @@ async def chat(req: ChatRequest, request: Request):
         history = _to_langchain(req.messages)
     else:
         # 有记忆：只认本轮新消息，历史由检查点按 thread_id 提供
-        thread_id = _checked_thread_id(req.thread_id)
+        thread_id = checked_thread_id(req.thread_id)
         last = req.messages[-1]
         if last.role != "user":
             raise HTTPException(
@@ -99,6 +89,26 @@ async def chat(req: ChatRequest, request: Request):
             except Exception as e:  # noqa: BLE001 - 落库失败不应影响对话
                 logger.warning("写入助手回答失败：%s", e)
 
+        async def audit_tool(ev: dict) -> None:
+            """工具轨迹落库（审计）。失败只记日志，不影响对话。"""
+            if memory is None:
+                return
+            args = ev.get("args")
+            try:
+                await memory.audit.append(
+                    thread_id=thread_id,
+                    tool=str(ev.get("name") or ""),
+                    args=args if isinstance(args, dict) else {},
+                    ok=bool(ev.get("ok")),
+                    error=ev.get("error"),
+                    rows=ev.get("rows"),
+                    truncated=ev.get("truncated"),
+                    approved=ev.get("approved"),
+                    duration_ms=ev.get("duration_ms"),
+                )
+            except Exception as e:  # noqa: BLE001 - 审计写入失败不应打断对话
+                logger.warning("写入审计失败：%s", e)
+
         if persist:
             # 先落 user 消息：即便随后报错/中断，历史里也留有这次提问
             try:
@@ -119,6 +129,8 @@ async def chat(req: ChatRequest, request: Request):
                 confirm_enabled=state.settings.agent.confirm_db_ops,
                 confirm_timeout_seconds=state.settings.agent.confirm_timeout_seconds,
             ):
+                if ev.get("type") == "tool" and ev.get("phase") == "end":
+                    await audit_tool(ev)
                 if ev.get("type") == "delta":
                     parts.append(str(ev.get("text") or ""))
                 elif ev.get("type") == "done":
@@ -138,7 +150,7 @@ async def chat(req: ChatRequest, request: Request):
     )
 
 
-@router.get("/api/health")
+@health_router.get("/api/health")
 async def health(request: Request):
     st = request.app.state.settings
     return {

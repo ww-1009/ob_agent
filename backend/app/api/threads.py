@@ -5,29 +5,9 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 
-from app.api.chat import THREAD_ID_RE
-from app.memory import MemoryRuntime
-
-
-def _memory_or_503(request: Request) -> MemoryRuntime:
-    memory = getattr(request.app.state, "memory", None)
-    if memory is None:
-        raise HTTPException(
-            status_code=503,
-            detail="会话记忆未启用（PG 不可用，或 memory.enabled=false）",
-        )
-    return memory
-
-
-def _checked_thread_id(thread_id: str) -> str:
-    if not THREAD_ID_RE.match(thread_id):
-        raise HTTPException(
-            status_code=422,
-            detail="thread_id 只允许字母、数字、下划线、连字符（长度 1-64）",
-        )
-    return thread_id
+from app.api.deps import checked_thread_id as _checked_thread_id, memory_or_503 as _memory_or_503
 
 
 def make_threads_router() -> APIRouter:

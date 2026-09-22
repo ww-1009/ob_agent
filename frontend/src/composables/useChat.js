@@ -3,6 +3,7 @@ import { ChatHttpError, postChat } from '../api/chat.js'
 import { ConfirmHttpError, postConfirm } from '../api/confirm.js'
 import { fetchHealth } from '../api/health.js'
 import { deleteThread, fetchThreadMessages, listThreads, ThreadsHttpError } from '../api/threads.js'
+import { AuditHttpError, listAudit } from '../api/audit.js'
 import { buildHistory, dedupeStatus, toMessageView } from './chatCore.js'
 import { loadThreadId, newThreadId, saveThreadId } from '../lib/threadId.js'
 
@@ -20,11 +21,14 @@ export function useChat() {
   const threadId = ref('')
   const threads = ref([]) // [{thread_id, title, created_at, updated_at, message_count}]
   const loadingThread = ref(false)
+  // 工具审计（后端 audit_event 表）：工具轨迹的持久化留痕
+  const auditEvents = ref([])
+  const loadingAudit = ref(false)
   let controller = null
   let sendSeq = 0 // latest-wins 令牌：与 busy/controller 同实例作用域；super-send 后旧流 finally 不误清新流共享态
 
   function mkAssistant() {
-    return { id: nextId(), role: 'assistant', content: '', status: [], state: 'streaming', error: '' }
+    return { id: nextId(), role: 'assistant', content: '', status: [], tools: [], state: 'streaming', error: '' }
   }
 
   function applyHistory(items) {
@@ -38,6 +42,20 @@ export function useChat() {
       threads.value = await listThreads()
     } catch (err) {
       if (err instanceof ThreadsHttpError && err.status === 503) memoryEnabled.value = false
+    }
+  }
+
+  /** 工具审计：默认查当前会话；threadIdFilter 传空则查全部会话。 */
+  async function refreshAudit(threadIdFilter) {
+    if (!memoryEnabled.value) return
+    loadingAudit.value = true
+    try {
+      const tid = threadIdFilter === undefined ? threadId.value : threadIdFilter
+      auditEvents.value = await listAudit(tid ? { threadId: tid } : {})
+    } catch (err) {
+      if (err instanceof AuditHttpError && err.status === 503) memoryEnabled.value = false
+    } finally {
+      loadingAudit.value = false
     }
   }
 
@@ -138,6 +156,20 @@ export function useChat() {
           } else if (ev.type === 'delta') {
             pending += String(ev.text ?? '')
             scheduleFlush()
+          } else if (ev.type === 'tool') {
+            // 工具轨迹：只含入参摘要/耗时/行数/成败，不含行数据
+            assistant.tools = [...assistant.tools, {
+              id: String(ev.id ?? ''),
+              name: String(ev.name ?? ''),
+              label: String(ev.label ?? ev.name ?? ''),
+              args: (ev.args && typeof ev.args === 'object') ? { ...ev.args } : {},
+              ok: ev.ok !== false,
+              error: ev.error ? String(ev.error) : '',
+              rows: Number.isInteger(ev.rows) ? ev.rows : null,
+              truncated: ev.truncated === true,
+              approved: (ev.approved === true || ev.approved === false) ? ev.approved : null,
+              duration_ms: Number.isFinite(ev.duration_ms) ? ev.duration_ms : null,
+            }]
           } else if (ev.type === 'confirm_request') {
             pendingConfirm.value = {
               request_id: String(ev.request_id ?? ''),
@@ -185,8 +217,11 @@ export function useChat() {
         busy.value = false
         controller = null
       }
-      // 后端在 done 之前已落库，这里刷新即可看到新会话/标题/计数
-      if (useMemory) void refreshThreads()
+      // 后端在 done 之前已落库/落审计，这里刷新即可看到新会话与新轨迹
+      if (useMemory) {
+        void refreshThreads()
+        void refreshAudit()
+      }
     }
   }
 
@@ -237,7 +272,8 @@ export function useChat() {
   return {
     messages, busy, canSend, llmNotConfigured, pendingConfirm,
     memoryEnabled, threadId, threads, loadingThread,
+    auditEvents, loadingAudit,
     send, stop, clear, decideConfirm,
-    init, openThread, newThread, removeThread, refreshThreads,
+    init, openThread, newThread, removeThread, refreshThreads, refreshAudit,
   }
 }

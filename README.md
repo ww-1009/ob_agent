@@ -19,6 +19,7 @@ The backend leverages langchain's `create_agent` under the hood to orchestrate t
   - [config.yaml Fields](#configyaml-fields)
   - [Configuration Priority](#configuration-priority)
 - [Conversation Memory (PostgreSQL)](#conversation-memory-postgresql)
+- [Tool Trace, Audit and Access Control](#tool-trace-audit-and-access-control)
 - [Deployment (Production)](#deployment-production)
   - [Overall Topology](#overall-topology)
   - [Step 0: Prepare Runtime Data (Important)](#step-0-prepare-runtime-data-important)
@@ -66,8 +67,10 @@ ob_agent/
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat (SSE) · GET /api/health
 │   │   │   ├── confirm.py    # POST /api/chat/confirm (Approval back-channel)
-│   │   │   └── threads.py    # GET /api/threads · GET/DELETE /api/threads/{id}
-│   │   ├── memory/           # Conversation memory: PG checkpointer + chat_message store
+│   │   │   ├── threads.py    # GET /api/threads · GET/DELETE /api/threads/{id}
+│   │   │   ├── audit.py      # GET /api/audit (tool-call audit)
+│   │   │   └── deps.py       # Shared deps: Bearer token, memory availability, thread_id
+│   │   ├── memory/           # PG checkpointer + chat_message history + audit_event
 │   │   └── tools/            # Dual-adapter implementation
 │   │       ├── base.py       # Data models / Exceptions / Protocol interfaces
 │   │       ├── ocp/          # OCP client: mock.py (fixtures) / real.py (httpx)
@@ -185,8 +188,10 @@ cp backend/.env.example backend/.env
 | `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PostgreSQL connection; set `dsn` to override the individual parts |
 | `memory`  | `pool_min_size` / `pool_max_size`                        | Connection pool bounds (shared by checkpointer and history table) |
 | `memory`  | `list_limit` / `messages_limit`                          | Default page caps for the thread-list / history endpoints |
+| `auth`    | `enabled`                                                | Require `Authorization: Bearer <token>` on every `/api/*` route except `/api/health` |
+| `auth`    | `token`                                                  | The shared token; `enabled: true` with an empty token fails fast at startup |
 
-Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`).
+Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`, `AUTH_ENABLED`, `AUTH_TOKEN`).
 
 ### Configuration Priority
 
@@ -226,6 +231,43 @@ curl -X DELETE http://127.0.0.1:8000/api/threads/demo-1
 **Prerequisites**: a reachable PostgreSQL database and a role allowed to create tables in `public` (the checkpointer creates its own tables on first start). `AsyncPostgresSaver.setup()` is idempotent; with multiple uvicorn workers a concurrent first start may log a migration conflict, which is handled by treating already-created tables as ready.
 
 **Degraded mode**: if PostgreSQL is unreachable, or `memory.enabled: false`, the backend still starts normally. `/api/threads*` returns `503`, `GET /api/health` reports `memory_enabled: false`, and the frontend hides the history sidebar and falls back to sending the full history on every request.
+
+---
+
+## Tool Trace, Audit and Access Control
+
+### Tool trace
+
+Every tool call is surfaced over SSE as a `tool` event once it finishes:
+
+```json
+{"type":"tool","phase":"end","id":"01a0ca10","name":"execute_sql","label":"执行只读 SQL",
+ "args":{"sql":"select ..."},"ok":true,"error":null,"rows":200,"truncated":true,
+ "approved":true,"duration_ms":842}
+```
+
+String arguments (SQL text) are truncated to 500 characters, and **result rows are never included** — the event carries call metadata only. The UI renders it as a collapsible list under the answer, so a diagnosis can be **checked** instead of trusted. Existing `status` events are unchanged, so older clients keep working.
+
+`approved` is `true`/`false` only for tools gated by human approval (`execute_sql`), and `null` for everything else. A denied or timed-out approval never reaches the tool handler and therefore never produces an `on_tool_end` — the confirmation middleware emits the `tool` event itself, which is why a **rejected** operation still shows up in the trace.
+
+### Audit log
+
+When memory is enabled, every tool event is also persisted to `audit_event` (same pool as the checkpointer): thread, tool, arguments, ok/error, rows, truncated, approved, duration.
+
+```bash
+curl -s "http://127.0.0.1:8000/api/audit?limit=20"
+curl -s "http://127.0.0.1:8000/api/audit?thread_id=demo-1&tool=execute_sql"
+```
+
+The UI exposes the same data through the **工具审计** button (current conversation, or all conversations). The audit table deliberately stores SQL text — that is its purpose — but never result rows. Audit uses the memory connection pool, so if memory is unavailable `/api/audit` returns `503` while tool trace over SSE keeps working.
+
+The audit trail is append-only: `DELETE /api/threads/{thread_id}` removes the conversation's messages and checkpoints but **intentionally keeps its audit rows**, so deleting a conversation cannot erase the record that a query was run.
+
+### Access control
+
+Minimal single-token scheme: set `auth.enabled: true` plus `auth.token` (or `AUTH_ENABLED`/`AUTH_TOKEN`). Every `/api/*` route except `/api/health` then requires `Authorization: Bearer <token>`; `/api/health` stays open so probes keep working. The frontend keeps the token in `localStorage` and prompts for it once on a `401` — no login page and no user accounts. Starting the backend with `auth.enabled: true` and an empty token fails immediately (fail closed).
+
+> Because conversations are now persisted, an unprotected deployment lets anyone who can reach the port read and delete every conversation **and** trigger read-only SQL on your clusters. Enable the token unless the port is already restricted to trusted networks.
 
 ---
 
@@ -298,8 +340,9 @@ The frontend initiates requests using relative paths:
 
 - `POST /api/chat` (SSE streaming conversation)
 - `POST /api/chat/confirm` (Approval back-channel)
-- `GET /api/health` (Health check)
-- `GET /api/threads` · `GET`/`DELETE /api/threads/{thread_id}/messages` (Conversation history; 503 when memory is disabled)
+- `GET /api/health` (Health check; the only route exempt from the access token)
+- `GET /api/threads` · `GET /api/threads/{thread_id}/messages` · `DELETE /api/threads/{thread_id}` (Conversation history; 503 when memory is disabled)
+- `GET /api/audit` (Tool-call audit log; 503 when memory is disabled)
 
 The reverse proxy MUST:
 1. Return static assets (HTML/JS/CSS, etc.) from `frontend/dist`.

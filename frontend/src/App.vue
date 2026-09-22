@@ -5,16 +5,40 @@ import QuickChips from './components/QuickChips.vue'
 import MessageBubble from './components/MessageBubble.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ThreadSidebar from './components/ThreadSidebar.vue'
+import AuditPanel from './components/AuditPanel.vue'
 import { useChat } from './composables/useChat.js'
 
 const {
   messages, busy, canSend, llmNotConfigured, pendingConfirm, send, stop, clear, decideConfirm,
   memoryEnabled, threads, loadingThread, threadId, init, openThread, newThread, removeThread,
+  auditEvents, loadingAudit, refreshAudit,
 } = useChat()
 const draft = ref('')
 const scrollEl = ref(null)
 const atBottom = ref(true)
 const MAX_INPUT = 2000
+// 工具审计面板：scope 为 'current'（仅本会话）或 'all'（全部会话）
+const auditOpen = ref(false)
+const auditScope = ref('current')
+
+// refreshAudit(undefined) = 当前会话；( '') = 全部会话
+function auditFilter() {
+  return auditScope.value === 'current' ? undefined : ''
+}
+
+async function toggleAudit() {
+  auditOpen.value = !auditOpen.value
+  if (auditOpen.value) await refreshAudit(auditFilter())
+}
+
+async function refreshAuditNow() {
+  await refreshAudit(auditFilter())
+}
+
+async function toggleAuditScope() {
+  auditScope.value = auditScope.value === 'current' ? 'all' : 'current'
+  await refreshAuditNow()
+}
 
 // 启动即对齐服务端能力：记忆开启时恢复上次会话与历史列表
 onMounted(() => {
@@ -98,6 +122,9 @@ watch(
       <header class="topbar">
         <h1 class="title">OceanBase DB Agent</h1>
         <div class="topbar-right">
+          <button v-if="memoryEnabled" type="button" class="btn-ghost" @click="toggleAudit">
+            {{ auditOpen ? '隐藏审计' : '工具审计' }}
+          </button>
           <!-- 侧栏已提供「新对话」入口，无侧栏（未启用记忆）时保留顶栏按钮 -->
           <button v-if="messages.length && !memoryEnabled" type="button" class="btn-ghost" @click="clear">新对话</button>
           <HealthBadge />
@@ -143,5 +170,15 @@ watch(
 
       <ConfirmDialog :confirm="pendingConfirm" @decide="decideConfirm" />
     </div>
+
+    <AuditPanel
+      v-if="auditOpen && memoryEnabled"
+      :events="auditEvents"
+      :loading="loadingAudit"
+      :scope="auditScope"
+      @close="auditOpen = false"
+      @refresh="refreshAuditNow"
+      @toggle-scope="toggleAuditScope"
+    />
   </div>
 </template>

@@ -15,12 +15,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Optional
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+
+from app.agent.tool_trace import tool_trace_event
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +121,7 @@ def build_confirm_middleware(
 
             rid = f"cf_{uuid.uuid4().hex[:16]}"
             args = call.get("args") or {}
+            started = time.monotonic()
             fut = broker.register(rid, owner=owner)
             _emit(emit, {
                 "type": "confirm_request",
@@ -142,6 +146,17 @@ def build_confirm_middleware(
 
             if not approved:
                 reason = "确认超时，已默认拒绝" if timed_out else "用户拒绝了该操作"
+                # 被拒绝不会执行 handler，因此不会有 on_tool_end —— 必须在此补发轨迹，
+                # 否则工具轨迹与审计会漏掉「被拒绝的操作」这一最该留痕的情况。
+                _emit(emit, tool_trace_event(
+                    run_id=rid,
+                    name=name,
+                    args=args,
+                    ok=False,
+                    error=reason,
+                    approved=False,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ))
                 return ToolMessage(
                     content=f"__confirm_denied__: {reason}。不要重复尝试同一操作，请换只读途径或向用户说明。",
                     name=name,

@@ -1,14 +1,17 @@
 """Agent 编排：把 langchain agent 的 astream_events 翻译成对外事件流。
 
-对外事件（dict）：{type: "status"|"delta"|"error"|"done", ...}
+对外事件（dict）：{type: "status"|"delta"|"tool"|"error"|"done", ...}
 
 - stream_chat 对历史消息运行 create_agent 驱动的 agent，逐个 yield 用户事件。
 - classify_agent_event 是纯函数：单条 v2 原始事件 → 用户事件 / None。
+- 工具轨迹（type="tool"）在 _produce 内按 run_id 配对 on_tool_start/on_tool_end 产出，
+  携带入参摘要、耗时、成败、行数；行数据本身永不进入事件。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import AsyncIterator, Dict, List, Mapping
 
@@ -18,8 +21,9 @@ from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
-from app.agent.confirm import build_confirm_middleware
+from app.agent.confirm import CONFIRM_TOOL_LABELS, build_confirm_middleware
 from app.agent.prompt import system_prompt
+from app.agent.tool_trace import extract_tool_result, tool_trace_event
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +135,8 @@ async def stream_chat(
             run_config["configurable"] = {"thread_id": thread_id}
         try:
             async with asyncio.timeout(max_seconds):
+                # run_id → 起始信息，用于把 on_tool_start / on_tool_end 配对成一条轨迹
+                pending: dict[str, dict] = {}
                 # create_agent 返回的是编译后的状态图，输入需按 {"messages": [...]} 传。
                 # 显式注入 recursion_limit：langgraph 运行时 config 会覆盖编译默认，
                 # 从而规避不同 langgraph 版本的默认差异（旧版默认 25，新版 create_agent 内部写 9999）。
@@ -139,6 +145,33 @@ async def stream_chat(
                     config=run_config,
                     version="v2",
                 ):
+                    etype = event.get("event")
+                    if etype == "on_tool_start":
+                        pending[str(event.get("run_id") or "")] = {
+                            "name": event.get("name") or "?",
+                            "args": (event.get("data") or {}).get("input") or {},
+                            "t0": time.monotonic(),
+                        }
+                    elif etype == "on_tool_end":
+                        rid = str(event.get("run_id") or "")
+                        started = pending.pop(rid, None) or {}
+                        name = event.get("name") or started.get("name") or "?"
+                        output = (event.get("data") or {}).get("output")
+                        ok, error, rows, truncated = extract_tool_result(output)
+                        t0 = started.get("t0")
+                        # 受 HITL 管控的工具能走到这里，说明用户已批准
+                        controlled = confirm_enabled and broker is not None and name in CONFIRM_TOOL_LABELS
+                        await q.put(tool_trace_event(
+                            run_id=rid,
+                            name=name,
+                            args=started.get("args") or (event.get("data") or {}).get("input") or {},
+                            ok=ok,
+                            error=error,
+                            rows=rows,
+                            truncated=truncated,
+                            approved=True if controlled else None,
+                            duration_ms=int((time.monotonic() - t0) * 1000) if t0 is not None else None,
+                        ))
                     user = classify_agent_event(event)
                     if user is not None:
                         await q.put(user)
