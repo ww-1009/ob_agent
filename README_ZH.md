@@ -76,7 +76,7 @@ ob_agent/
 │   │       ├── base.py       # 数据模型 / 异常 / 协议接口
 │   │       ├── ocp/          # OCP 客户端：mock.py（fixtures）/ real.py（httpx）
 │   │       └── sql/          # SQL 执行器：guard.py（只读防线）/ mock / real
-│   ├── run.py / run.sh       # 启动入口
+│   ├── run.sh                # 启动入口（首次运行会据 requirements.txt 创建 .venv）
 │   ├── requirements.txt
 │   ├── config.example.yaml   # 示例配置（入库）
 │   ├── config.yaml           # 实际配置（已 gitignore，不再被 git 跟踪）
@@ -117,7 +117,8 @@ pip install -r requirements.txt
 cd backend
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# 方式二：用仓库内脚本（需先存在 backend/.venv，激活后启动）
+# 方式二：用仓库内脚本（任意目录均可执行；首次运行会自动创建 backend/.venv
+# 并按 requirements.txt 安装，随后监听 127.0.0.1:8000）
 ./backend/run.sh
 ```
 
@@ -333,7 +334,7 @@ curl -s "http://127.0.0.1:8000/api/audit?thread_id=demo-1&tool=execute_sql"
 cd backend
 python3.13 -m venv .venv            # 或使用 uv
 source .venv/bin/activate
-pip install -r requirements.txt      # 或：uv sync --project backend
+pip install -r requirements.txt      # 依赖以 requirements.txt 为唯一来源
 ```
 
 生产环境建议**关闭 reload** 并常驻运行。

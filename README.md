@@ -75,7 +75,7 @@ ob_agent/
 │   │       ├── base.py       # Data models / Exceptions / Protocol interfaces
 │   │       ├── ocp/          # OCP client: mock.py (fixtures) / real.py (httpx)
 │   │       └── sql/          # SQL executor: guard.py (Read-only defense) / mock / real
-│   ├── run.py / run.sh       # Startup entrypoints
+│   ├── run.sh                # Startup entrypoint (creates .venv from requirements.txt on first run)
 │   ├── requirements.txt
 │   ├── config.example.yaml   # Example config (Tracked in Git)
 │   ├── config.yaml           # Actual config (Gitignored, not tracked)
@@ -114,7 +114,8 @@ Start the service (defaults to mock mode if `backend/config.yaml` / `.env` is ab
 cd backend
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# Option 2: Use repository script (Requires backend/.venv to exist and be activated)
+# Option 2: use the repo script (works from any cwd; creates backend/.venv and
+# installs from requirements.txt on first run, then serves on 127.0.0.1:8000)
 ./backend/run.sh
 ```
 
@@ -321,7 +322,7 @@ The following data **is not distributed via git** (excluded by `.gitignore`) and
 cd backend
 python3.13 -m venv .venv            # Or use uv
 source .venv/bin/activate
-pip install -r requirements.txt      # Or: uv sync --project backend
+pip install -r requirements.txt      # requirements.txt is the single source of dependencies
 ```
 
 In production, it is recommended to **disable reload** and run continuously.
