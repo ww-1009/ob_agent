@@ -75,7 +75,9 @@ ob_agent/
 │   ├── run.py / run.sh       # Startup entrypoints
 │   ├── requirements.txt
 │   ├── config.example.yaml   # Example config (Tracked in Git)
-│   └── config.yaml           # Actual config (Gitignored)
+│   ├── config.yaml           # Actual config (Gitignored, not tracked)
+│   ├── .env.example          # Example env vars (Tracked in Git)
+│   └── .env                  # Actual env vars (Gitignored, not tracked)
 │   ├── ob_wiki/              # OceanBase official docs knowledge base (Gitignored, required at runtime)
 │   └── data/                 # mock fixtures (Partially gitignored)
 ├── frontend/                 # Vue 3 + Vite frontend

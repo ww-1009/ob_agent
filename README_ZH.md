@@ -76,7 +76,9 @@ ob_agent/
 │   ├── run.py / run.sh       # 启动入口
 │   ├── requirements.txt
 │   ├── config.example.yaml   # 示例配置（入库）
-│   └── config.yaml           # 实际配置（gitignore，不入库）
+│   ├── config.yaml           # 实际配置（已 gitignore，不再被 git 跟踪）
+│   ├── .env.example          # 示例环境变量（入库）
+│   └── .env                  # 实际环境变量（已 gitignore，不再被 git 跟踪）
 │   ├── ob_wiki/              # OceanBase 官方文档知识库（gitignore，运行时需就位）
 │   └── data/                 # mock fixtures（gitignore 部分）
 ├── frontend/                 # Vue 3 + Vite 前端
