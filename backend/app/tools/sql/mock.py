@@ -4,6 +4,7 @@
 - SELECT <cols|*|count(*)> FROM <table> [WHERE col = 'value'] [LIMIT n]
   表名大小写不敏感；列清单可跨行；WHERE 仅支持单条等值条件
   （col = '字面量' 或 col = 裸值），值按字符串比较。
+- SHOW CREATE TABLE <table>：由 sample_tables.json 的列与首行取值合成 DDL（类型按值推断）
 - FROM 命中 sample_tables.json 的表，或 oceanbase.gv$sql_audit（由 slow_sqls.json 生成）
 - EXPLAIN <...> 单词匹配 explain_results.json 的 match 字段
 其余语法（如 >、!=、AND 多条件、未知列/表）一律抛 SqlExecutionError。
@@ -27,6 +28,9 @@ _COUNT_STAR = re.compile(r"\bcount\s*\(\s*\*\s*\)", re.I)
 _SELECT_COLS = re.compile(r"select\s+(.+?)\s+from\b", re.I | re.S)
 _WHERE = re.compile(r"\bwhere\b", re.I)
 _AND = re.compile(r"\band\b", re.I)
+_SHOW_CREATE = re.compile(r"^\s*show\s+create\s+table\s+(?P<name>[`\w.$]+)", re.I)
+_DATETIME_LITERAL = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
+_DATE_LITERAL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class MockSqlExecutor:
@@ -38,6 +42,8 @@ class MockSqlExecutor:
         body = self._strip_prefix(sql, "explain")  # explain 交给 explain()
         if body is not None:
             return self.explain(body)
+        if _SHOW_CREATE.match(sql):
+            return self._show_create_table(sql)
         table = self._table_of(sql)
         if table is None:
             raise SqlExecutionError("无法解析 FROM 表名")
@@ -73,10 +79,7 @@ class MockSqlExecutor:
         return m.group(1).strip() if m else None
 
     def _select(self, sql: str, table: str) -> QueryResult:
-        p = self._data_dir / "sample_tables.json"
-        tables = json.loads(p.read_text(encoding="utf-8"))
-
-        lookup = {k.lower(): v for k, v in tables.items()}
+        lookup = self._tables()
 
         if table.lower() == "gv$sql_audit":
             return self._select_audit(sql)
@@ -126,6 +129,49 @@ class MockSqlExecutor:
             cols, out = columns, rows
 
         return QueryResult(columns=cols, rows=out)
+
+    def _tables(self) -> dict:
+        p = self._data_dir / "sample_tables.json"
+        return {k.lower(): v for k, v in json.loads(p.read_text(encoding="utf-8")).items()}
+
+    @staticmethod
+    def _sql_type(values) -> str:
+        """按首个非空取值的 Python 类型/字面量形态推断列类型（夹具不含类型信息）。"""
+        for v in values:
+            if isinstance(v, bool):
+                return "tinyint(1)"
+            if isinstance(v, int):
+                return "bigint(20)"
+            if isinstance(v, float):
+                return "decimal(10,2)"
+            if isinstance(v, str):
+                if _DATETIME_LITERAL.match(v):
+                    return "datetime"
+                if _DATE_LITERAL.match(v):
+                    return "date"
+                return "varchar(64)"
+        return "varchar(64)"
+
+    def _show_create_table(self, sql: str) -> QueryResult:
+        """由 sample_tables.json 合成 SHOW CREATE TABLE 结果（列类型按取值推断，首列为主键）。"""
+        m = _SHOW_CREATE.match(sql)
+        table = m.group("name").split(".")[-1].strip("`")
+        data = self._tables().get(table.lower())
+        if data is None:
+            raise SqlExecutionError(f"mock 中不存在表: {table}")
+
+        columns = data["columns"]
+        rows = data.get("rows") or []
+        # 逐列收集取值，用于类型推断
+        by_col = [[r[i] for r in rows if i < len(r)] for i in range(len(columns))]
+        lines = [
+            f"  `{c}` {self._sql_type(by_col[i])} DEFAULT NULL"
+            for i, c in enumerate(columns)
+        ]
+        if columns:
+            lines.append(f"  PRIMARY KEY (`{columns[0]}`)")
+        ddl = f"CREATE TABLE `{table}` (\n" + ",\n".join(lines) + "\n) DEFAULT CHARSET = utf8mb4"
+        return QueryResult(columns=["Table", "Create Table"], rows=[[table, ddl]])
 
     def _select_audit(self, sql: str) -> QueryResult:
         p = self._data_dir / "slow_sqls.json"

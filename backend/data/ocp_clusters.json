@@ -1,0 +1,11 @@
+[
+  {
+    "id": 1,
+    "name": "obcluster",
+    "clusterName": "obcluster",
+    "status": "RUNNING",
+    "region": "cn-hangzhou",
+    "obVersion": "4.2.5.0",
+    "serverCount": 3
+  }
+]

@@ -14,8 +14,9 @@ from langchain_community.agent_toolkits import FileManagementToolkit
 from app.agent.tool_input import SlowSqlInput, FullSqlTextInput, SqlTopPlanInput, ExecuteSqlInput, SqlExplainInput, \
      TableDDLInput
 from app.config import SqlConfig, load_settings
-from app.tools.base import OcpClient, SqlExecutor
+from app.tools.base import OcpClient, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import assert_read_only
+from app.tools.sql.mock import MockSqlExecutor
 from app.tools.sql.real import RealSqlExecutor
 
 
@@ -27,23 +28,41 @@ def _fail(error: str) -> str:
     return json.dumps({"ok": False, "error": error}, ensure_ascii=False)
 
 def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str, sql_config: SqlConfig):
-    user=sql_config.username
+    """按配置返回 SQL 执行器。
 
-    password=sql_config.password
-    ob_host_str=sql_config.host
-    if ob_host_str:
-        config = ast.literal_eval(ob_host_str)
-        host,port = config[cluster_name].split(':')
-    else:
-        return None
-    user_str = f'{user}@{tenant_name}#{cluster_name}'
-    config = SqlConfig(provider="real",host=host,db_name=db_name,username=user_str,password=password,
-                       connect_timeout=sql_config.connect_timeout,query_timeout_seconds=sql_config.query_timeout_seconds)
-    if tenant_type == "MYSQL":
-        return RealSqlExecutor(config)
-    else:
+    - Oracle 租户暂不支持（mock/real 一致返回 None，由调用方给出提示）
+    - provider != "real"（即 mock）：直接用固定夹具的 MockSqlExecutor，使 mock 模式离线可用
+    - provider == "real"：按 host_map 把「集群名 → host:port」解析成本租户的连接串
+    解析失败抛 SqlExecutionError，由调用方的 try 转成 {"ok": false} 观察结果。
+    """
+    if tenant_type != "MYSQL":
         # todo:待完善oracle租户数据库连接
         return None
+
+    if sql_config.provider != "real":
+        return MockSqlExecutor()
+
+    ob_host_str = sql_config.host
+    if not ob_host_str:
+        raise SqlExecutionError("sql_ro.host_map 未配置：real 模式需要「集群名 → host:port」映射")
+    host_map = ast.literal_eval(ob_host_str)
+    entry = host_map.get(cluster_name)
+    if not entry:
+        raise SqlExecutionError(
+            f"sql_ro.host_map 中没有集群 {cluster_name}（已有: {', '.join(sorted(host_map)) or '空'}）"
+        )
+    host, _, port = str(entry).partition(':')
+    user_str = f'{sql_config.username}@{tenant_name}#{cluster_name}'
+    return RealSqlExecutor(SqlConfig(
+        provider="real",
+        host=host,
+        port=int(port) if port else sql_config.port,
+        db_name=db_name,
+        username=user_str,
+        password=sql_config.password,
+        connect_timeout=sql_config.connect_timeout,
+        query_timeout_seconds=sql_config.query_timeout_seconds,
+    ))
 
 def build_tools(
     ocp: OcpClient,
@@ -164,13 +183,13 @@ def build_tools(
     def execute_sql(tenant_name: str, cluster_name: str, db_name: str, sql: str, tenant_type: str) -> str:
         """连接数据库执行查询操作"""
         assert_read_only(sql)
-        sql_executor = _create_db_connect(tenant_name, cluster_name, db_name, tenant_type,sql_ro_config)
-        # todo:待完善oracle租户数据库连接
-        if sql_executor is None:
-            # logger.warning(f"oracle租户连接功能待开发")
-            return "暂不支持查询oracle租户"
-        # logger.info(f"Calling tool: execute_sql  with arguments: {sql}")
+        # 连接解析也必须在 try 内：否则 host_map 缺键等异常会抛出工具之外，
+        # 违反「工具异常一律转 ok:false」的约定并中断 agent 轮次。
         try:
+            sql_executor = _create_db_connect(tenant_name, cluster_name, db_name, tenant_type, sql_ro_config)
+            if sql_executor is None:
+                # todo:待完善oracle租户数据库连接
+                return "暂不支持查询oracle租户"
             r = sql_executor.query(sql)
             rows = [] if not send_row_data else r.rows
             return _ok(columns=r.columns, rows=rows, row_count=r.row_count, truncated=r.truncated)

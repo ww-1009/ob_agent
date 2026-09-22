@@ -1,0 +1,43 @@
+[
+  {
+    "match": "orders",
+    "columns": [
+      "ID",
+      "OPERATOR",
+      "NAME",
+      "EST.ROWS",
+      "COST"
+    ],
+    "rows": [
+      [0, "TABLE SCAN", "orders", 1280, 48210],
+      [1, "EXCHANGE OUT", "distributed", 1280, 20]
+    ]
+  },
+  {
+    "match": "customer",
+    "columns": [
+      "ID",
+      "OPERATOR",
+      "NAME",
+      "EST.ROWS",
+      "COST"
+    ],
+    "rows": [
+      [0, "TABLE SCAN", "customer", 640, 21600],
+      [1, "EXCHANGE OUT", "distributed", 640, 18]
+    ]
+  },
+  {
+    "match": "",
+    "columns": [
+      "ID",
+      "OPERATOR",
+      "NAME",
+      "EST.ROWS",
+      "COST"
+    ],
+    "rows": [
+      [0, "TABLE SCAN", "unknown", 1, 1]
+    ]
+  }
+]

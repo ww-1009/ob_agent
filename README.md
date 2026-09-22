@@ -82,7 +82,7 @@ ob_agent/
 │   ├── .env.example          # Example env vars (Tracked in Git)
 │   └── .env                  # Actual env vars (Gitignored, not tracked)
 │   ├── ob_wiki/              # OceanBase official docs knowledge base (Gitignored, required at runtime)
-│   └── data/                 # mock fixtures (Partially gitignored)
+│   └── data/                 # mock fixtures (Tracked; real_*.json is gitignored)
 ├── frontend/                 # Vue 3 + Vite frontend
 │   ├── src/                  # Components / composables / api / lib
 │   ├── tests/                # vitest pure logic unit tests
@@ -141,6 +141,19 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
 > With conversation memory enabled (`memory.enabled: true`) this same request must also carry a `thread_id`; see [Conversation Memory (PostgreSQL)](#conversation-memory-postgresql).
 
 > When LLM is not configured, the service starts as usual, and `/api/chat` returns a 503 advising you to complete the LLM configuration. Offline end-to-end validation is completed by injecting a stub model (`tests/helpers/scripted_model.py`), without relying on a real LLM.
+
+**Mock fixtures** — `backend/data/*.json` holds the offline fixtures that make `provider: mock` work end to end:
+
+| Fixture | Used by |
+| --- | --- |
+| `ocp_tenants.json`, `ocp_clusters.json`, `topology.json` | `get_tenant_info` |
+| `ocp_slow_sqls.json` (first `sqlId` is `sq-scan-orders-1`) | `get_slow_sql` |
+| `ocp_sql_text.json`, `ocp_top_plan.json`, `ocp_sql_explain.json` | `get_full_sql_text`, `get_sql_top_plan`, `get_sql_explain` |
+| `sample_tables.json` | `execute_sql`, plus the synthesized `SHOW CREATE TABLE` behind `get_table_ddl` |
+| `slow_sqls.json` | the simplified `list_slow_sql` / `oceanbase.gv$sql_audit` mock path |
+| `explain_results.json` | the mock `EXPLAIN` lookup |
+
+With `ocp.provider: mock` **and** `sql_ro.provider: mock`, all seven tools answer from these fixtures, so the demo runs with neither OCP nor a database reachable. `real_*.json` files are for captured real responses and stay gitignored.
 
 ### Frontend
 
