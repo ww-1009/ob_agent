@@ -49,6 +49,9 @@ memory:
   pool_max_size: 5
   list_limit: 50            # GET /api/threads 默认条数上限
   messages_limit: 500       # GET /api/threads/{id}/messages 默认条数上限
+  audit_retention_days: 0   # >0 时启动清理更早的审计行；0 = 永久保留（审计默认只增不删）
+  open_timeout_seconds: 5   # 启动时打开连接的等待上限（PG 不可用要尽快降级，别拖住启动）
+  open_attempts: 2          # 启动尝试次数；最坏启动阻塞 ≈ open_attempts × open_timeout_seconds + 退避
 auth:
   enabled: false            # true 时除 /api/health 外所有 /api 都要求 Bearer 令牌
   token: ""                 # 与 enabled=true 搭配；为空会导致后端拒绝启动（fail closed）

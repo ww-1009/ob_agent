@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime
 from typing import AsyncIterator, Dict, List, Mapping
 
@@ -27,19 +28,19 @@ from app.agent.tool_trace import extract_tool_result, tool_trace_event
 
 logger = logging.getLogger(__name__)
 
-# 工具 → 人性化 status 文案（on_tool_start 用）
+# 工具 → 人性化 status 文案（on_tool_start 用）；须与 build_tools 实际注册的工具名保持一致
 TOOL_STATUS: Dict[str, str] = {
-    "get_topology": "正在获取集群/租户信息…",
+    "get_tenant_info": "正在从 OCP 拉取租户信息…",
     "get_slow_sql": "正在从 OCP 拉取慢SQL…",
     "get_full_sql_text": "正在从 OCP 拉取完整SQL文本…",
     "get_sql_explain": "正在从 OCP 拉取执行计划…",
     "get_sql_top_plan": "正在从 OCP 拉取SQL计划uid…",
-    "get_tenants_list": "正在从 OCP 拉取租户列表…",
-    "get_tenant_info": "正在从 OCP 拉取租户信息…",
-    "get_clusters_list": "正在从 OCP 拉取集群列表…",
 
     "execute_sql": "正在执行只读 SQL 查询…",
     "get_table_ddl": "正在获取表结构信息…",
+
+    "read_file": "正在读取官方文档…",
+    "list_directory": "正在列出文档目录…",
 }
 
 
@@ -177,12 +178,25 @@ async def stream_chat(
                         await q.put(user)
                 await q.put({"type": "done"})
         except TimeoutError:
-            await q.put({"type": "error", "message": f"agent 执行超过 {max_seconds}s，已中止"})
+            error_id = uuid.uuid4().hex[:8]
+            logger.warning("agent 执行超时 [error_id=%s] max_seconds=%s", error_id, max_seconds)
+            await q.put({
+                "type": "error",
+                "error_id": error_id,
+                "message": f"agent 执行超过 {max_seconds}s，已中止（error_id={error_id}）",
+            })
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("agent 执行失败: %s", e)
-            await q.put({"type": "error", "message": str(e)})
+            # 不把异常原文下发客户端：psycopg/pymysql/httpx 的报错常带 host、库名甚至连接串片段。
+            # 完整堆栈只进服务端日志，客户端拿 error_id 便于对照排查。
+            error_id = uuid.uuid4().hex[:8]
+            logger.exception("agent 执行失败 [error_id=%s]: %s", error_id, e)
+            await q.put({
+                "type": "error",
+                "error_id": error_id,
+                "message": f"agent 执行出错，请稍后重试或凭 error_id 联系管理员（error_id={error_id}）",
+            })
         finally:
             if broker is not None:
                 broker.fail_all(asyncio.current_task(), reason="stream_end")

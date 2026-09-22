@@ -1,6 +1,7 @@
 """聊天与健康检查路由。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import AsyncIterator, List, Literal
 
@@ -40,6 +41,25 @@ def _to_langchain(messages: List[ChatMessage]) -> List[BaseMessage]:
     ]
 
 
+def _thread_lock(state, thread_id: str) -> asyncio.Lock:
+    """按会话取互斥锁。
+
+    同一 thread 并发两轮会让 langgraph 写出分叉的检查点（上下文互相覆盖），
+    因此显式串行化：占用中直接 409，而不是静默排队或写坏状态。
+    锁对象按 thread_id 保留到进程结束（数量受会话数上限约束，不做驱逐，
+    以免"释放后驱逐 + 第三方新建"导致同一 thread 出现两把锁）。
+    """
+    locks = getattr(state, "thread_locks", None)
+    if locks is None:
+        locks = {}
+        state.thread_locks = locks
+    lock = locks.get(thread_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[thread_id] = lock
+    return lock
+
+
 @router.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
     state = request.app.state
@@ -66,6 +86,27 @@ async def chat(req: ChatRequest, request: Request):
             )
         user_text = last.content
         history = [HumanMessage(content=user_text)]
+
+    # 同一会话串行化：占用中直接拒绝，避免并发两轮写坏检查点分支。
+    # 在端点内取锁（asyncio 单线程下 locked() 检查与 acquire 之间不会让出），
+    # 在流的 finally 释放，保证客户端断连时也能解锁。
+    thread_lock: asyncio.Lock | None = None
+    if thread_id is not None:
+        thread_lock = _thread_lock(state, thread_id)
+        if thread_lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail="该会话正在处理上一条消息，请等待完成，或新建会话后再提问",
+            )
+        await thread_lock.acquire()
+
+    released = False
+
+    def release_lock() -> None:
+        nonlocal released
+        if thread_lock is not None and not released:
+            released = True
+            thread_lock.release()
 
     async def gen() -> AsyncIterator[str]:
         # 每次请求独立 broker：owner 注册为 producer task（stream_chat 内部），
@@ -142,21 +183,34 @@ async def chat(req: ChatRequest, request: Request):
                 state.active_broker = None
             # 错误/客户端中断路径：把已收到的部分回答落库（空则跳过）
             await persist_answer()
+            release_lock()
 
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    try:
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except BaseException:
+        # 极端情况下流未被消费：确保锁不泄漏
+        release_lock()
+        raise
 
 
 @health_router.get("/api/health")
 async def health(request: Request):
     st = request.app.state.settings
-    return {
+    memory = getattr(request.app.state, "memory", None)
+    error = getattr(request.app.state, "memory_error", None)
+    payload = {
         "status": "ok",
         "ocp_provider": st.ocp.provider,
         "sql_provider": st.meta_db.provider,
         "llm_configured": st.llm.is_configured,
-        "memory_enabled": getattr(request.app.state, "memory", None) is not None,
+        "memory_enabled": memory is not None,
+        "auth_enabled": st.auth.enabled,
     }
+    # 仅在实际降级时暴露原因，便于线上判断"为什么没有记忆/审计"
+    if memory is None and error:
+        payload["memory_error"] = error
+    return payload

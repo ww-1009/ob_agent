@@ -80,6 +80,19 @@ def build_tools(
         ]
     ).get_tools()
 
+    # 真实执行器按 (租户, 集群, 库, 租户类型) 缓存：复用底层长连接，
+    # 避免每次工具调用都重新建连与鉴权（见 RealSqlExecutor 的连接复用说明）。
+    executor_cache: dict[tuple[str, str, str, str], SqlExecutor] = {}
+
+    def _db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str):
+        key = (tenant_name, cluster_name, db_name, tenant_type)
+        executor = executor_cache.get(key)
+        if executor is None:
+            executor = _create_db_connect(tenant_name, cluster_name, db_name, tenant_type, sql_ro_config)
+            if executor is not None:  # Oracle 租户返回 None，不缓存
+                executor_cache[key] = executor
+        return executor
+
     @tool
     def get_tenant_info() -> str:
         """
@@ -186,7 +199,7 @@ def build_tools(
         # 连接解析也必须在 try 内：否则 host_map 缺键等异常会抛出工具之外，
         # 违反「工具异常一律转 ok:false」的约定并中断 agent 轮次。
         try:
-            sql_executor = _create_db_connect(tenant_name, cluster_name, db_name, tenant_type, sql_ro_config)
+            sql_executor = _db_connect(tenant_name, cluster_name, db_name, tenant_type)
             if sql_executor is None:
                 # todo:待完善oracle租户数据库连接
                 return "暂不支持查询oracle租户"
@@ -202,7 +215,7 @@ def build_tools(
         try:
             # logger.info(f"Calling tool: execute_sql  with arguments: {sql}")
             if tenant_type == "MYSQL":
-                sql_executor = _create_db_connect(tenant_name, cluster_name, db_name, tenant_type, sql_ro_config)
+                sql_executor = _db_connect(tenant_name, cluster_name, db_name, tenant_type)
                 r = sql_executor.query(f"show create table {table_name};")
                 return _ok(columns=r.columns, rows=r.rows, row_count=r.row_count, truncated=r.truncated)
             else:

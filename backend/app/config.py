@@ -96,6 +96,12 @@ class MemoryConfig:
     pool_max_size: int = 5
     list_limit: int = 50       # GET /api/threads 默认上限
     messages_limit: int = 500  # GET /api/threads/{id}/messages 默认上限
+    # >0 时在启动阶段清理更早的 audit_event 行；0 = 永久保留（默认，保持既有行为）
+    audit_retention_days: int = 0
+    # 启动打开连接的等待上限与尝试次数：失败要尽快降级，不能让启动被 PG 拖住
+    # （最坏耗时 ≈ open_attempts × open_timeout_seconds + 退避）
+    open_timeout_seconds: int = 5
+    open_attempts: int = 2
 
     def build_dsn(self) -> str:
         """拼装连接串；分项拼装交给 psycopg 处理转义（避免手写 URL 编码出错）。"""
@@ -260,6 +266,17 @@ def load_settings(
             pool_max_size=int(memory_y.get("pool_max_size", 5)),
             list_limit=int(memory_y.get("list_limit", 50)),
             messages_limit=int(memory_y.get("messages_limit", 500)),
+            audit_retention_days=int(
+                _env_nonempty(env, "MEMORY_AUDIT_RETENTION_DAYS")
+                or memory_y.get("audit_retention_days", 0)
+            ),
+            open_timeout_seconds=int(
+                _env_nonempty(env, "MEMORY_OPEN_TIMEOUT_SECONDS")
+                or memory_y.get("open_timeout_seconds", 5)
+            ),
+            open_attempts=int(
+                _env_nonempty(env, "MEMORY_OPEN_ATTEMPTS") or memory_y.get("open_attempts", 2)
+            ),
         ),
         auth=AuthConfig(
             enabled=_as_bool(

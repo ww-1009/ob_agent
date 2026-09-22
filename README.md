@@ -62,7 +62,7 @@ ob_agent/
 │   │   │   ├── model.py      # Build ChatOpenAI
 │   │   │   ├── prompt.py     # System Prompt (DBA Assistant + Rules)
 │   │   │   ├── confirm.py    # HITL Human-in-the-loop confirmation channel (ConfirmationBroker + Middleware)
-│   │   │   ├── tools.py      # 7 Tools exposed to LLM + ob_wiki file tool
+│   │   │   ├── tools.py      # 7 DBA tools + 2 read-only doc file tools (9 registered)
 │   │   │   └── tool_input.py # Tool input Pydantic models
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat (SSE) · GET /api/health
@@ -128,7 +128,7 @@ curl -s http://127.0.0.1:8000/api/health
 Expected output (Mock default, LLM unconfigured):
 
 ```json
-{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false,"memory_enabled":false}
+{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false,"memory_enabled":false,"auth_enabled":false}
 ```
 
 Chat example (SSE streaming; returns a clear 503 error if LLM is not configured):
@@ -202,6 +202,8 @@ cp backend/.env.example backend/.env
 | `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PostgreSQL connection; set `dsn` to override the individual parts |
 | `memory`  | `pool_min_size` / `pool_max_size`                        | Connection pool bounds (shared by checkpointer and history table) |
 | `memory`  | `list_limit` / `messages_limit`                          | Default page caps for the thread-list / history endpoints |
+| `memory`  | `audit_retention_days`                                   | `>0` prunes audit rows older than N days at startup; `0` (default) keeps the trail forever |
+| `memory`  | `open_timeout_seconds` / `open_attempts`                 | Startup connect budget; worst-case startup block ≈ `open_attempts × open_timeout_seconds` + backoff |
 | `auth`    | `enabled`                                                | Require `Authorization: Bearer <token>` on every `/api/*` route except `/api/health` |
 | `auth`    | `token`                                                  | The shared token; `enabled: true` with an empty token fails fast at startup |
 
@@ -282,6 +284,14 @@ The audit trail is append-only: `DELETE /api/threads/{thread_id}` removes the co
 Minimal single-token scheme: set `auth.enabled: true` plus `auth.token` (or `AUTH_ENABLED`/`AUTH_TOKEN`). Every `/api/*` route except `/api/health` then requires `Authorization: Bearer <token>`; `/api/health` stays open so probes keep working. The frontend keeps the token in `localStorage` and prompts for it once on a `401` — no login page and no user accounts. Starting the backend with `auth.enabled: true` and an empty token fails immediately (fail closed).
 
 > Because conversations are now persisted, an unprotected deployment lets anyone who can reach the port read and delete every conversation **and** trigger read-only SQL on your clusters. Enable the token unless the port is already restricted to trusted networks.
+
+### Failure surfacing
+
+An unexpected agent failure is **not** streamed verbatim: the client gets a generic message plus a short `error_id` (`{"type":"error","error_id":"ab12cd34","message":"agent 执行出错…（error_id=ab12cd34）"}`) while the full traceback stays in the server log — connection strings and hosts must not leak to the browser. Tool/database errors are the deliberate exception: they still flow to the LLM and into the trace and audit, because a DBA needs to see *why* a query failed.
+
+Two concurrent requests on the same `thread_id` are rejected with `409` rather than being allowed to write divergent checkpoints, so a second browser tab gets a clear "this conversation is busy" message instead of silently corrupting the context.
+
+`GET /api/health` reports `auth_enabled` always, and adds `memory_error` **only** when memory/audit degraded, so you can tell why the history endpoints are returning `503`.
 
 ---
 

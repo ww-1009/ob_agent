@@ -2,43 +2,38 @@
 
 三层防线：
 1. 语法白名单（guard.assert_read_only），在任何连接之前执行。
-2. 只读专用账号：要求在 dsn 中配置（配置文档建议 agent_ro 仅授 SELECT）。
+2. 只读专用账号：建议 sql_ro 配置仅授 SELECT 的账号。
 3. 会话与执行防护：autocommit=1；超时；结果行数上限截断。
 
-说明：连接/鉴权细节在真实环境就绪后联调确认（本任务离线只验证 1/缺 dsn 路径）。
+连接按执行器实例**复用**（长连接 + ping(reconnect=True)）：早先每次查询都新建并关闭连接，
+一轮对话多次调用工具就要多次 TCP + 鉴权（经 obproxy 时延迟明显）。PyMySQL 连接不是线程
+安全的，因此每个执行器持有一把锁，把自己的查询串行化。
 """
 from __future__ import annotations
 
-from urllib.parse import unquote, urlsplit
+import threading
+import weakref
 
 from app.config import SqlConfig
 from app.tools.base import QueryResult, SqlExecutionError
 from app.tools.sql.guard import assert_read_only
 
-#
-# def _parse_dsn(dsn: str) -> dict:
-#     # dsn 形如 mysql+pymysql://user:pass@host:port/db（密码允许含 @ / 百分号编码）
-#     try:
-#         p = urlsplit(dsn)
-#         port = p.port  # 非法端口抛 ValueError
-#     except ValueError as e:
-#         raise SqlExecutionError(f"无法解析 dsn: {dsn!r}") from e
-#     if p.scheme != "mysql+pymysql" or not p.hostname or p.username is None:
-#         raise SqlExecutionError(
-#             f"无法解析 dsn: {dsn!r}（需形如 mysql+pymysql://user:pass@host:port/db）"
-#         )
-#     return {
-#         "user": unquote(p.username),
-#         "password": unquote(p.password or ""),
-#         "host": p.hostname,
-#         "port": port or 3306,
-#         "db": p.path.lstrip("/") or None,
-#     }
+# 进程内所有真实执行器（弱引用）：应用关闭时统一释放长连接
+_LIVE_EXECUTORS: "weakref.WeakSet[RealSqlExecutor]" = weakref.WeakSet()
+
+
+def close_all_executors() -> None:
+    """关闭所有存活执行器的长连接；由应用 lifespan 的关闭钩子调用。"""
+    for executor in list(_LIVE_EXECUTORS):
+        executor.close()
 
 
 class RealSqlExecutor:
     def __init__(self, config: SqlConfig) -> None:
         self._cfg = config
+        self._conn = None
+        self._lock = threading.Lock()
+        _LIVE_EXECUTORS.add(self)
 
     def _connect(self):
         try:
@@ -60,19 +55,58 @@ class RealSqlExecutor:
             write_timeout=self._cfg.query_timeout_seconds,
         )
 
-    def _run(self, sql: str) -> QueryResult:
-        conn = self._connect()
+    # ---- 连接生命周期（以下方法要求调用方已持有 self._lock）----
+
+    def _close_locked(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不影响后续重连
+                pass
+
+    def _conn_for_use(self):
+        """复用长连接；服务端断连/空闲超时用 ping(reconnect=True) 自愈。"""
+        if self._conn is None:
+            self._conn = self._connect()
+            return self._conn
         try:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                cols = [d[0] for d in cur.description] if cur.description else []
-                max_rows = self._cfg.max_rows
-                rows = cur.fetchmany(max_rows + 1)
-                truncated = len(rows) > max_rows
-                rows = rows[:max_rows]
-                return QueryResult(columns=cols, rows=[list(r) for r in rows], truncated=truncated)
-        finally:
-            conn.close()
+            self._conn.ping(reconnect=True)
+        except Exception:  # noqa: BLE001 - 连不回来就丢弃，下次重建
+            self._close_locked()
+            self._conn = self._connect()
+        return self._conn
+
+    @staticmethod
+    def _is_connection_error(exc: BaseException) -> bool:
+        """只有连接类错误才丢弃连接；SQL 语法/权限等错误保留连接。"""
+        try:
+            import pymysql
+        except ImportError:  # pragma: no cover
+            return False
+        return isinstance(exc, (pymysql.err.OperationalError, pymysql.err.InterfaceError))
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_locked()
+
+    def _run(self, sql: str) -> QueryResult:
+        with self._lock:
+            conn = self._conn_for_use()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    max_rows = self._cfg.max_rows
+                    rows = cur.fetchmany(max_rows + 1)
+                    truncated = len(rows) > max_rows
+                    rows = rows[:max_rows]
+                    return QueryResult(columns=cols, rows=[list(r) for r in rows], truncated=truncated)
+            except Exception as e:
+                # 断连/超时等连接类错误：丢弃连接以便下次重连；SQL 本身的问题保留连接
+                if self._is_connection_error(e):
+                    self._close_locked()
+                raise
 
     def query(self, sql: str) -> QueryResult:
         assert_read_only(sql)  # 防线 1：先于连接

@@ -88,6 +88,21 @@ class AuditStore:
                     rows, truncated, approved, duration_ms,
                 ))
 
+    async def prune(self, retention_days: int) -> int:
+        """清理超过保留期的审计行；retention_days<=0 表示永久保留（返回 0）。
+
+        审计是只增不改的留痕，默认不删；只有显式配置保留期才清理，便于合规与容量权衡。
+        """
+        if retention_days <= 0:
+            return 0
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM audit_event WHERE created_at < now() - make_interval(days => %s)",
+                    (int(retention_days),),
+                )
+                return int(cur.rowcount or 0)
+
     async def list_events(
         self,
         limit: int,

@@ -63,7 +63,7 @@ ob_agent/
 │   │   │   ├── model.py      # 构建 ChatOpenAI
 │   │   │   ├── prompt.py     # System Prompt（DBA 助手 + 规则）
 │   │   │   ├── confirm.py    # HITL 人工确认通道（ConfirmationBroker + 中间件）
-│   │   │   ├── tools.py      # 暴露给 LLM 的 7 个工具 + ob_wiki 文件工具
+│   │   │   ├── tools.py      # 7 个 DBA 工具 + 2 个只读文档文件工具（共注册 9 个）
 │   │   │   └── tool_input.py # 工具入参 Pydantic 模型
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
@@ -131,7 +131,7 @@ curl -s http://127.0.0.1:8000/api/health
 预期输出（mock 默认、未配置 LLM）：
 
 ```json
-{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false,"memory_enabled":false}
+{"status":"ok","ocp_provider":"mock","sql_provider":"mock","llm_configured":false,"memory_enabled":false,"auth_enabled":false}
 ```
 
 聊天示例（SSE 流式；未配置 LLM 时返回 503 清晰提示）：
@@ -209,6 +209,8 @@ cp backend/.env.example backend/.env
 | `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PG 连接信息；给 `dsn` 可整体覆盖分项                          |
 | `memory`  | `pool_min_size` / `pool_max_size`                        | 连接池上下限（检查点与历史表共用一个池）                             |
 | `memory`  | `list_limit` / `messages_limit`                          | 会话列表 / 历史消息接口的默认条数上限                            |
+| `memory`  | `audit_retention_days`                                   | `>0` 时启动清理更早的审计行；`0`（默认）永久保留审计留痕                |
+| `memory`  | `open_timeout_seconds` / `open_attempts`                 | 启动连接预算；最坏启动阻塞 ≈ `open_attempts × open_timeout_seconds` + 退避 |
 | `auth`    | `enabled`                                                | 除 `/api/health` 外所有 `/api/*` 要求 `Authorization: Bearer <token>` |
 | `auth`    | `token`                                                  | 共享令牌；`enabled: true` 而令牌为空会导致启动失败（fail closed）    |
 
@@ -289,6 +291,14 @@ curl -s "http://127.0.0.1:8000/api/audit?thread_id=demo-1&tool=execute_sql"
 最小方案：单令牌。设置 `auth.enabled: true` 与 `auth.token`（或环境变量 `AUTH_ENABLED` / `AUTH_TOKEN`），此后除 `/api/health` 外所有 `/api/*` 都要求 `Authorization: Bearer <token>`；`/api/health` 保持放行以便探活。前端把令牌存在 `localStorage`，收到 `401` 时弹一次性输入框——不引入登录页，也不引入用户账号。`auth.enabled: true` 而令牌为空时后端**启动即失败**（fail closed）。
 
 > 由于会话现在会被持久化，未加保护的部署意味着任何能访问该端口的人都能读取、删除全部会话，**并**对你的集群触发只读 SQL。除非端口已限定在可信网络内，请开启令牌。
+
+### 失败如何呈现
+
+agent 的**意外异常不会原文下发**：客户端只拿到一句通用文案加一个短 `error_id`（`{"type":"error","error_id":"ab12cd34","message":"agent 执行出错…（error_id=ab12cd34）"}`），完整堆栈只留在服务端日志——连接串、主机名不应泄漏给浏览器。工具/数据库错误是有意的例外：它们仍会送给 LLM 并落入轨迹与审计，因为 DBA 需要看到查询**为什么**失败。
+
+同一 `thread_id` 的并发请求会返回 `409` 而不是被允许写出分叉的检查点，因此第二个浏览器标签会看到明确的「该会话正在处理中」，而不是静默写坏上下文。
+
+`GET /api/health` 固定返回 `auth_enabled`，并**仅在**记忆/审计降级时附带 `memory_error`，便于判断历史接口为何返回 `503`。
 
 ---
 
