@@ -192,8 +192,6 @@ cp backend/.env.example backend/.env
 | `ocp`     | `base_url`                                               | 填 OCP 4.3.5 网关地址（如 `https://<ocp-host>:<port>`） |
 | `ocp`     | `username`/`password`                                    | HTTP Basic Auth（OCP 管理账号，非 /login 会话）           |
 | `ocp`     | `verify_ssl`                                             | 是否校验 OCP TLS 证书                                 |
-| `meta_db` | `provider`                                               | `mock \| real`                                  |
-| `meta_db` | `host`/`port`/`username`/`password`/`db_name`            | real 时直连元数据库（当前版本无用）                            |
 | `sql_ro`  | `provider`                                               | `mock \| real`                                  |
 | `sql_ro`  | `host_map`                                               | real 时：集群名 → 连接串的映射（dict 字符串）                   |
 | `sql_ro`  | `username`/`password`                                    | 只读数据库账号（建议仅授 SELECT）                            |
@@ -320,7 +318,7 @@ agent 的**意外异常不会原文下发**：客户端只拿到一句通用文�
                        ┌────────┴────────┐
                        ▼                 ▼
                     OCP 网关         只读数据库
-                 （ocp.base_url）  （meta_db / sql_ro）
+                 （ocp.base_url）    （sql_ro）
 ```
 
 ### 第 0 步：准备运行时数据（重要）

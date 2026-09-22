@@ -1,17 +1,6 @@
-"""SQL 执行器工厂。
+"""只读 SQL 执行器（guard / mock / real）。
 
-注意：get_meta_db_executor 目前没有调用方——meta_db 配置段在当前版本尚未使用
-（README 已注明）。保留它是为后续 meta_db 能力接入预留的装配位。
+历史提示：本包曾有一个 `get_meta_db_executor` 工厂与 `meta_db` 配置段，两者都没有调用方，
+已整体删除（2024 版 README 里标注的「当前版本无用」）。如后续真需要接元数据库，
+从 git 历史取回即可。
 """
-from __future__ import annotations
-
-from app.config import Settings
-from app.tools.sql.mock import MockSqlExecutor
-
-
-def get_meta_db_executor(settings: Settings):
-    if settings.meta_db.provider == "real":
-        from app.tools.sql.real import RealSqlExecutor  # Task 8 实现
-
-        return RealSqlExecutor(settings.meta_db)
-    return MockSqlExecutor()

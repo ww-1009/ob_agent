@@ -9,15 +9,6 @@ ocp:
   username: "xxxx"              # 鉴权：HTTP Basic Auth（OCP 管理账号，非 /login 会话）
   password: "xxx"
   verify_ssl: true
-meta_db:
-  provider: real            # mock | real
-  host: "test_shrbank_ob001"
-  port: 3306
-  db_name: "llm_db"
-  username: "xxx@xxx#test_shrbank_ob001"
-  password: "xxxxx"
-  connect_timeout: 5
-  query_timeout_seconds: 10
 sql_ro:
   provider: real            # mock | real
   # 集群名 -> "host:port" 的 dict 字符串；execute_sql / get_table_ddl 按传入的集群名取连接
@@ -36,6 +27,9 @@ llm:
 agent:
   send_row_data: true       # false 时送入 LLM 的结果不含行数据
   max_seconds: 180          # 单轮 agent 总时长兜底
+  confirm_db_ops: true      # 变更类操作是否要人工确认（HITL 审批）
+  confirm_timeout_seconds: 120   # 等待人工确认的超时；超时按「拒绝」处理
+  recursion_limit: 100      # langgraph 单轮图步数上限，防止工具调用打转
 memory:
   enabled: false            # true 时启用会话记忆（依赖 PostgreSQL，详见 README「会话记忆」）
   # dsn 非空则优先，可整体覆盖下面的分项连接信息

@@ -185,8 +185,6 @@ cp backend/.env.example backend/.env
 | `ocp`     | `base_url`                                               | OCP 4.3.5 gateway address (e.g., `https://<ocp-host>:<port>`) |
 | `ocp`     | `username`/`password`                                    | HTTP Basic Auth (OCP admin account, not /login session) |
 | `ocp`     | `verify_ssl`                                             | Whether to verify OCP TLS certificates           |
-| `meta_db` | `provider`                                               | `mock \| real`                                  |
-| `meta_db` | `host`/`port`/`username`/`password`/`db_name`            | Direct connection to meta database when real (Unused in current version) |
 | `sql_ro`  | `provider`                                               | `mock \| real`                                  |
 | `sql_ro`  | `host_map`                                               | When real: Cluster name → Connection string mapping (dict string) |
 | `sql_ro`  | `username`/`password`                                    | Read-only database account (SELECT privilege only recommended) |
@@ -207,7 +205,7 @@ cp backend/.env.example backend/.env
 | `auth`    | `enabled`                                                | Require `Authorization: Bearer <token>` on every `/api/*` route except `/api/health` |
 | `auth`    | `token`                                                  | The shared token; `enabled: true` with an empty token fails fast at startup |
 
-Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`, `AUTH_ENABLED`, `AUTH_TOKEN`).
+Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`, `AUTH_ENABLED`, `AUTH_TOKEN`, `CONFIRM_DB_OPS`, `CONFIRM_TIMEOUT_SECONDS`, `RECURSION_LIMIT`).
 
 ### Configuration Priority
 
@@ -311,7 +309,7 @@ Two concurrent requests on the same `thread_id` are rejected with `409` rather t
                        ┌────────┴────────┐
                        ▼                 ▼
                   OCP Gateway     Read-only Database
-                 (ocp.base_url)    (meta_db / sql_ro)
+                 (ocp.base_url)       (sql_ro)
 ```
 
 ### Step 0: Prepare Runtime Data (Important)

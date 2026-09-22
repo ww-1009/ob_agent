@@ -205,7 +205,7 @@ async def health(request: Request):
     payload = {
         "status": "ok",
         "ocp_provider": st.ocp.provider,
-        "sql_provider": st.meta_db.provider,
+        "sql_provider": st.sql_ro.provider,
         "llm_configured": st.llm.is_configured,
         "memory_enabled": memory is not None,
         "auth_enabled": st.auth.enabled,

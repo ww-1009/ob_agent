@@ -136,7 +136,6 @@ class AuthConfig:
 class Settings:
     ocp: OcpConfig = field(default_factory=OcpConfig)
     sql_ro: SqlConfig = field(default_factory=SqlConfig)
-    meta_db: SqlConfig = field(default_factory=SqlConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -186,7 +185,6 @@ def load_settings(
 
     ocp_y = data.get("ocp", {}) or {}
     sql_ro_y = data.get("sql_ro", {}) or {}
-    meta_db_y = data.get("meta_db", {}) or {}
     llm_y = data.get("llm", {}) or {}
     agent_y = data.get("agent", {}) or {}
     memory_y = data.get("memory", {}) or {}
@@ -214,16 +212,6 @@ def load_settings(
             password=_env_nonempty(env, "SQL_RO_PASSWORD") or sql_ro_y.get("password", ""),
             connect_timeout=int(sql_ro_y.get("connect_timeout", 5)),
             query_timeout_seconds=int(sql_ro_y.get("query_timeout_seconds", 10)),
-        ),
-        meta_db=SqlConfig(
-            provider=_env_nonempty(env, "META_DB_PROVIDER") or meta_db_y.get("provider", "mock"),
-            host=_env_nonempty(env, "META_DB_HOST") or meta_db_y.get("host", ""),
-            port=_env_nonempty(env, "META_DB_PORT") or meta_db_y.get("port", 3306),
-            username=_env_nonempty(env, "META_DB_USERNAME") or meta_db_y.get("username", ""),
-            password=_env_nonempty(env, "META_DB_PASSWORD") or meta_db_y.get("password", ""),
-            db_name=_env_nonempty(env, "META_DB_NAME") or meta_db_y.get("db_name", ""),
-            connect_timeout=int(meta_db_y.get("connect_timeout", 5)),
-            query_timeout_seconds=int(meta_db_y.get("query_timeout_seconds", 10)),
         ),
         llm=LLMConfig(
             base_url=_env_nonempty(env, "LLM_BASE_URL") or llm_y.get("base_url", ""),
