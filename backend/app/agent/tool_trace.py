@@ -15,6 +15,9 @@ from app.agent.tool_labels import tool_label
 # 工具入参中单个字符串字段的最大长度（SQL/DDL 会很长，避免 SSE 与审计表膨胀）
 ARG_MAX_CHARS = 500
 
+# langchain_community 文件工具的失败前缀（成功时是纯文本，不带前缀）
+_ERROR_PREFIX = "error:"
+
 
 def truncate_args(args: Mapping | None, limit: int = ARG_MAX_CHARS) -> dict:
     """入参截断：只截长字符串，其余类型原样保留。"""
@@ -30,29 +33,40 @@ def truncate_args(args: Mapping | None, limit: int = ARG_MAX_CHARS) -> dict:
 def extract_tool_result(output: object) -> tuple[bool, str | None, int | None, bool | None]:
     """从工具返回解析 (ok, error, rows, truncated)。
 
-    本项目工具统一返回 {"ok": ...} 的 JSON 字符串；文件工具返回纯文本，
-    此时按「成功、无行数」处理。返回值里绝不含行数据。
+    两类返回约定：
+    - 本项目工具："{'ok': ...}" JSON 字符串（成败、行数、截断都在里面）；
+    - langchain_community 文件工具：成功是纯文本（文件内容/目录清单），失败是 "Error: ..."。
+    返回值里绝不含行数据。
     """
     content = getattr(output, "content", output)
     if not isinstance(content, str):
         return True, None, None, None
+
     try:
         data = json.loads(content)
     except (TypeError, ValueError):
-        return True, None, None, None
-    if not isinstance(data, dict) or "ok" not in data:
-        return True, None, None, None
-    err = data.get("error")
-    rows = data.get("row_count")
-    if not isinstance(rows, int) and isinstance(data.get("items"), list):
-        rows = len(data["items"])
-    truncated = data.get("truncated")
-    return (
-        bool(data.get("ok")),
-        str(err) if err else None,
-        rows if isinstance(rows, int) else None,
-        bool(truncated) if truncated is not None else None,
-    )
+        data = None
+
+    if isinstance(data, dict) and "ok" in data:
+        rows = data.get("row_count")
+        if not isinstance(rows, int) and isinstance(data.get("items"), list):
+            rows = len(data["items"])
+        truncated = data.get("truncated")
+        return (
+            bool(data.get("ok")),
+            str(data.get("error")) if data.get("error") else None,
+            rows if isinstance(rows, int) else None,
+            bool(truncated) if truncated is not None else None,
+        )
+
+    # 非 JSON：langchain_community 的文件工具（read_file / list_directory 等）
+    # 成功时返回纯文本（文件内容或目录清单），失败时统一返回 "Error: ..."
+    # （含 "Error: Access denied ..." 模板）。不识别它就会把失败记成成功。
+    # 唯一误判可能是「文档内容恰好以 Error: 开头」，代价仅是轨迹标注错误。
+    stripped = content.lstrip()
+    if stripped[: len(_ERROR_PREFIX)].lower() == _ERROR_PREFIX:
+        return False, stripped, None, None
+    return True, None, None, None
 
 
 def tool_trace_event(
