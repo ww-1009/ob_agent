@@ -151,11 +151,11 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
 
 | 夹具 | 被谁使用 |
 | --- | --- |
-| `ocp_tenants.json`、`ocp_clusters.json`、`topology.json` | `get_tenant_info` |
+| `ocp_tenants.json`、`ocp_clusters.json` | `get_tenant_info` |
 | `ocp_slow_sqls.json`（首条 `sqlId` 为 `sq-scan-orders-1`） | `get_slow_sql` |
 | `ocp_sql_text.json`、`ocp_top_plan.json`、`ocp_sql_explain.json` | `get_full_sql_text`、`get_sql_top_plan`、`get_sql_explain` |
 | `sample_tables.json` | `execute_sql`，以及 `get_table_ddl` 背后合成的 `SHOW CREATE TABLE` |
-| `slow_sqls.json` | 简化的 `list_slow_sql` / `oceanbase.gv$sql_audit` mock 路径 |
+| `slow_sqls.json` | `execute_sql` 背后 mock 的 `oceanbase.gv$sql_audit` 路径 |
 | `explain_results.json` | mock 的 `EXPLAIN` 匹配表 |
 
 当 `ocp.provider: mock` **且** `sql_ro.provider: mock` 时，7 个工具全部改由这些夹具作答，因此在既连不上 OCP、也连不上数据库的环境下演示仍可跑通。`real_*.json` 用于存放抓取的真实响应，仍被 gitignore。

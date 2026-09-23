@@ -147,11 +147,11 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
 
 | Fixture | Used by |
 | --- | --- |
-| `ocp_tenants.json`, `ocp_clusters.json`, `topology.json` | `get_tenant_info` |
+| `ocp_tenants.json`, `ocp_clusters.json` | `get_tenant_info` |
 | `ocp_slow_sqls.json` (first `sqlId` is `sq-scan-orders-1`) | `get_slow_sql` |
 | `ocp_sql_text.json`, `ocp_top_plan.json`, `ocp_sql_explain.json` | `get_full_sql_text`, `get_sql_top_plan`, `get_sql_explain` |
 | `sample_tables.json` | `execute_sql`, plus the synthesized `SHOW CREATE TABLE` behind `get_table_ddl` |
-| `slow_sqls.json` | the simplified `list_slow_sql` / `oceanbase.gv$sql_audit` mock path |
+| `slow_sqls.json` | the mock `oceanbase.gv$sql_audit` path behind `execute_sql` |
 | `explain_results.json` | the mock `EXPLAIN` lookup |
 
 With `ocp.provider: mock` **and** `sql_ro.provider: mock`, all seven tools answer from these fixtures, so the demo runs with neither OCP nor a database reachable. `real_*.json` files are for captured real responses and stay gitignored.
