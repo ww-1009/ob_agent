@@ -16,7 +16,7 @@ from app.tools.ocp.mock import MockOcpClient
 from app.tools.ocp.real import _elapsed_us, _first_present, _ms_to_us, _normalize_mode
 from app.tools.sql.base import PooledSqlExecutor
 from app.tools.sql.oracle import OracleSqlExecutor, resolve_config as resolve_oracle_config
-from app.tools.sql.real import MysqlSqlExecutor, resolve_config as resolve_mysql_config
+from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysql_config
 
 _EXPECTED_TOOLS = {
     "get_tenant_info",

@@ -17,9 +17,8 @@ from app.tools.base import QueryResult, SqlExecutionError
 from app.tools.sql.base import PooledSqlExecutor
 from app.tools.sql.guard import assert_safe_identifier
 
-# 长连接注册表（MySQL 与 Oracle 执行器共用）。close_all_executors 在此一并重新
-# 导出，保持 `from app.tools.sql.real import close_all_executors` 这类旧调用方可用；
-# 应用装配请直接从 app.tools.sql.registry 导入。
+# 长连接注册表（MySQL 与 Oracle 执行器共用）。close_all_executors 在此顺带再导出，
+# 方便按方言模块取用；应用装配请直接从 app.tools.sql.registry 导入。
 from app.tools.sql.registry import close_all_executors  # noqa: F401
 
 __all__ = ["MysqlSqlExecutor", "resolve_config", "close_all_executors"]

@@ -1,6 +1,6 @@
 """OceanBase Oracle 模式租户的只读 SQL 执行器：OCI 驱动（oracledb / cx_Oracle）。
 
-与 real.py（MySQL/PyMySQL）的分工：real.py 走 PyMySQL 连 MySQL 模式租户，本模块走
+与 mysql.py（MySQL/PyMySQL）的分工：mysql.py 走 PyMySQL 连 MySQL 模式租户，本模块走
 OCI 驱动连 Oracle 模式租户。两者共用 ``app.tools.sql.base.PooledSqlExecutor`` 的
 长连接复用、锁串行化、只读防线与结果截断，只有「建连」与「表结构 SQL」是方言相关；
 上层只看到同一个 ``SqlExecutor`` 契约，agent 不感知方言。
@@ -14,9 +14,9 @@ OCI 驱动连 Oracle 模式租户。两者共用 ``app.tools.sql.base.PooledSqlE
 
 两个驱动的 API 同源（CLOB / LONG_STRING / LONG_BINARY / cursor.var /
 outputtypehandler / ping / call_timeout 均一致），所以只有装载那一步需要分支。
-导入保持**惰性**（同 real.py 对 pymysql 的写法）：没装驱动只影响 Oracle 租户。
+导入保持**惰性**（同 mysql.py 对 pymysql 的写法）：没装驱动只影响 Oracle 租户。
 
-连接按执行器实例复用（长连接 + ping 自愈 + 锁串行化），理由同 real.py：一轮对话
+连接按执行器实例复用（长连接 + ping 自愈 + 锁串行化），理由同 mysql.py：一轮对话
 多次调工具，每次重新 TCP + 鉴权经 obproxy 时代价明显。
 """
 from __future__ import annotations

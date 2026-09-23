@@ -18,7 +18,7 @@ from app.tools.base import OcpClient, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import assert_read_only
 from app.tools.sql.mock import MockSqlExecutor
 from app.tools.sql.oracle import OracleSqlExecutor, resolve_config as resolve_oracle_config
-from app.tools.sql.real import MysqlSqlExecutor, resolve_config as resolve_mysql_config
+from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysql_config
 
 
 def _ok(**payload: object) -> str:

@@ -1,6 +1,6 @@
 """真实 SQL 执行器的公共骨架（方言无关）。
 
-``MysqlSqlExecutor``（PyMySQL，real.py）与 ``OracleSqlExecutor``（OCI，oracle.py）
+``MysqlSqlExecutor``（PyMySQL，mysql.py）与 ``OracleSqlExecutor``（OCI，oracle.py）
 除了「怎么建连」和「表结构 SQL 怎么写」之外，其余行为完全一致：
 
 - 只读三层防线的第 1 层：``guard.assert_read_only`` 在任何连接之前执行；
@@ -9,7 +9,7 @@
 - 每个执行器一把锁，把自己的查询串行化（驱动连接不是线程安全的）；
 - 统一的错误包装：连接/执行失败一律转成 ``SqlExecutionError``。
 
-把这些骨架收在本模块，子类只实现方言钩子，避免 real.py 与 oracle.py 逐行重复。
+把这些骨架收在本模块，子类只实现方言钩子，避免 mysql.py 与 oracle.py 逐行重复。
 """
 from __future__ import annotations
 
