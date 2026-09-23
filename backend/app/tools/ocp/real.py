@@ -14,10 +14,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import OcpConfig, load_settings
-from app.tools.base import (
-    ClusterInfo,
-    OcpClientError
-)
+from app.tools.base import OcpClientError
 from app.tools.ocp import get_ocp_client
 
 # ---------- 模块级常量 ----------
@@ -89,7 +86,7 @@ class RealOcpClient:
     """OCP real HTTP 客户端：Basic Auth + envelope 归一 。
 
     异常统一：配置/依赖缺失、HTTP/传输失败、报文形状异常、映射阶段异常全部归一为
-    OcpClientError；成功返回共享模型（TopologyInfo / SlowSqlItem）。
+    OcpClientError；成功时返回归一化后的 dict / list（字段与 OCP 报文同构，由工具层再加工）。
     httpx 在 __init__ 不 import（模块顶层不依赖 httpx，离线可 import），仅在使用时懒加载。
     """
 

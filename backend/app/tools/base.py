@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, List, Literal, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, List, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -17,40 +17,6 @@ class SqlExecutionError(ValueError):
 
 class OcpClientError(ValueError):
     """OCP 客户端错误（配置缺失 / 依赖缺失 / HTTP 失败统一入口）。"""
-
-
-# ---------- OCP 数据模型 ----------
-
-
-class TenantInfo(BaseModel):
-    tenant_id: str
-    name: str
-    mode: Literal["mysql", "oracle"]
-    cluster_id: str
-    cluster_name: str
-    status: str = "RUNNING"
-
-
-class ClusterInfo(BaseModel):
-    cluster_id: str
-    cluster_name: str
-    tenants: List[TenantInfo] = Field(default_factory=list)
-
-
-class TopologyInfo(BaseModel):
-    clusters: List[ClusterInfo] = Field(default_factory=list)
-
-
-class SlowSqlItem(BaseModel):
-    sql_id: str
-    sql_text: str
-    db_name: str
-    user_name: str
-    avg_elapsed_us: int
-    max_elapsed_us: int
-    exec_count: int
-    first_seen: Optional[str] = None
-    last_seen: Optional[str] = None
 
 
 # ---------- SQL 结果模型 ----------
@@ -76,8 +42,6 @@ class QueryResult(BaseModel):
 
 @runtime_checkable
 class OcpClient(Protocol):
-    def get_topology(self) -> TopologyInfo: ...
-
     def get_slow_sql(self, cluster_id: int, tenant_id: int, start_time: str, end_time: str,
                      server_id: int = None, inner: bool = False, sql_text: str = None,
                      filter_expression: str = None, limit: int = None, sql_text_length: int = 100): ...
