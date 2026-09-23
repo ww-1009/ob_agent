@@ -161,3 +161,64 @@ async def test_slow_consumer_not_cancelled_by_timeout():
         await asyncio.sleep(0.4)  # 每步停顿 > 超时：旧实现会在消费端 await 处抛 CancelledError
     assert events[-1]["type"] in ("done", "error")
     assert "error" not in [e["type"] for e in events]
+
+
+@pytest.mark.asyncio
+async def test_e2e_explain_tool_event_carries_plan_view():
+    """执行计划可视化：tool 事件必须带归一化后的 plan（先序 depth + 算子汇总），供前端画树。"""
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_sql_explain",
+                        "args": {"cluster_id": 1, "tenant_id": 1, "uid": "plan-8f3a1c02"},
+                        "id": "c1",
+                    }
+                ],
+            ),
+            AIMessage(content="orders 是全表扫描。"),
+        ]
+    )
+    tools = build_tools(MockOcpClient(), MockSqlExecutor(), send_row_data=True)
+    events = []
+    async for ev in stream_chat(model, tools, [HumanMessage(content="看下执行计划")]):
+        events.append(ev)
+
+    tool_events = [e for e in events if e["type"] == "tool"]
+    assert len(tool_events) == 1
+    tool_ev = tool_events[0]
+    assert tool_ev["ok"] is True and tool_ev["name"] == "get_sql_explain"
+    plan = tool_ev["plan"]
+    assert plan["uid"] == "plan-8f3a1c02" and plan["sql_id"] == "sq-scan-orders-1"
+    assert [(n["operator"], n["depth"]) for n in plan["nodes"]] == [
+        ("EXCHANGE OUT", 0),
+        ("TABLE SCAN", 1),
+    ]
+    assert plan["nodes"][1]["name"] == "orders" and plan["nodes"][1]["cost"] == 48210
+    assert plan["summary"][0]["operator"] == "TABLE SCAN"
+    assert plan["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_e2e_other_tools_have_no_plan_key():
+    """其余工具不占位：事件里没有 plan 键，前端不会渲染空计划块。"""
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": _SLOW_SQL_TOOL, "args": {"cluster_id": 1, "tenant_id": 1, "limit": 2}, "id": "c1"}
+                ],
+            ),
+            AIMessage(content="没有慢SQL。"),
+        ]
+    )
+    tools = build_tools(MockOcpClient(), MockSqlExecutor(), send_row_data=True)
+    events = []
+    async for ev in stream_chat(model, tools, [HumanMessage(content="慢SQL？")]):
+        events.append(ev)
+
+    tool_events = [e for e in events if e["type"] == "tool"]
+    assert tool_events and all("plan" not in e for e in tool_events)

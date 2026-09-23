@@ -6,6 +6,7 @@
 - classify_agent_event 是纯函数：单条 v2 原始事件 → 用户事件 / None。
 - 工具轨迹（type="tool"）在 _produce 内按 run_id 配对 on_tool_start/on_tool_end 产出，
   携带入参摘要、耗时、成败、行数；行数据本身永不进入事件。
+- get_sql_explain 额外带归一化后的执行计划视图（算子/代价，仍不含行数据），供前端画计划树。
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
 from app.agent.confirm import CONFIRM_TOOL_LABELS, build_confirm_middleware
+from app.agent.plan_view import extract_plan_view
 from app.agent.prompt import system_prompt
 from app.agent.tool_trace import extract_tool_result, tool_trace_event
 
@@ -176,6 +178,8 @@ async def stream_chat(
                             truncated=truncated,
                             approved=True if controlled else None,
                             duration_ms=int((time.monotonic() - t0) * 1000) if t0 is not None else None,
+                            # 仅 get_sql_explain 会拿到 plan（其余工具返回 None）
+                            plan=extract_plan_view(name, output),
                         ))
                     user = classify_agent_event(event)
                     if user is not None:

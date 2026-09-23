@@ -4,6 +4,8 @@
 因此独立成模块，避免 runner ←→ confirm 的循环依赖。
 
 事件不含任何行数据：只带工具名、入参摘要、耗时、成败、行数与是否被批准。
+唯一例外是 get_sql_explain：额外带一份归一化后的执行计划视图（算子/估算行数/代价），
+属于计划元信息而非行数据，见 plan_view.py。
 """
 from __future__ import annotations
 
@@ -80,9 +82,10 @@ def tool_trace_event(
     truncated: bool | None = None,
     approved: bool | None = None,
     duration_ms: int | None = None,
+    plan: Mapping | None = None,
 ) -> dict:
     """工具轨迹事件（phase=end）。approved 只对受 HITL 管控的工具取值，其余为 None。"""
-    return {
+    event = {
         "type": "tool",
         "phase": "end",
         "id": (run_id or "")[:8],
@@ -96,3 +99,7 @@ def tool_trace_event(
         "approved": approved,
         "duration_ms": duration_ms,
     }
+    # 只有执行计划带结构化数据；其余工具不占位，省事件体积
+    if plan:
+        event["plan"] = plan
+    return event

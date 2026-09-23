@@ -268,7 +268,14 @@ def build_tools(
                 plan_data = data_list["data"]
                 plan_operation_summery = data_list["planOperationSummery"]
                 root_operations = data_list["rootOperations"]
-                return _ok(items=[{"plan_data": plan_data, "plan_operation_summery": plan_operation_summery, "root_operations": root_operations}])
+                # 带上 uid/sqlId：计划视图要能自报「这是哪个 SQL 的计划」，前端标题用
+                return _ok(items=[{
+                    "uid": data_list.get("uid") or uid,
+                    "sql_id": data_list.get("sqlId"),
+                    "plan_data": plan_data,
+                    "plan_operation_summery": plan_operation_summery,
+                    "root_operations": root_operations,
+                }])
         except Exception as e:
             return _error(e)
 

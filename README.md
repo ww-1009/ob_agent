@@ -265,6 +265,8 @@ String arguments (SQL text) are truncated to 500 characters, and **result rows a
 
 `approved` is `true`/`false` only for tools gated by human approval (`execute_sql`), and `null` for everything else. A denied or timed-out approval never reaches the tool handler and therefore never produces an `on_tool_end` — the confirmation middleware emits the `tool` event itself, which is why a **rejected** operation still shows up in the trace.
 
+`get_sql_explain` events additionally carry a `plan` object: the backend normalizes the OCP plan payload into a pre-order, depth-annotated operator tree plus an operator summary (operators, rows, cost, properties — still **no result rows**). The UI draws that as an execution-plan tree and highlights the most expensive operator; every other tool omits the field.
+
 ### Audit log
 
 When memory is enabled, every tool event is also persisted to `audit_event` (same pool as the checkpointer): thread, tool, arguments, ok/error, rows, truncated, approved, duration.
