@@ -1,12 +1,16 @@
 """暴露给 langchain agent 的工具，薄封装。
-- 工具内部异常一律转成 {"ok": false, "error": ...} 的 JSON 观察结果，
+- 工具内部异常一律转成 {"ok": false, "error": ..., "error_kind": ...} 的 JSON 观察结果，
   让 LLM 解释或换法重试（spec §8.1）；成功返回含 ok:true 的 JSON。
+- 异常摘要会脱敏（主机/账号/连接串不下发），完整原文只进服务端日志，两者用 error_id 关联。
 - execute_sql 先过 assert_read_only，禁止写操作。
 """
 from __future__ import annotations
 
-import json
 import ast
+import json
+import logging
+import re
+import uuid
 from typing import Sequence
 
 from langchain_core.tools import BaseTool, tool
@@ -14,19 +18,72 @@ from langchain_community.agent_toolkits import FileManagementToolkit
 from app.agent.tool_input import SlowSqlInput, FullSqlTextInput, SqlTopPlanInput, ExecuteSqlInput, SqlExplainInput, \
      TableDDLInput
 from app.config import SqlConfig, load_settings
-from app.tools.base import OcpClient, SqlExecutionError, SqlExecutor
-from app.tools.sql.guard import assert_read_only
+from app.tools.base import OcpClient, OcpClientError, SqlExecutionError, SqlExecutor
+from app.tools.sql.guard import ReadOnlyViolation, assert_read_only
 from app.tools.sql.mock import MockSqlExecutor
 from app.tools.sql.oracle import OracleSqlExecutor, resolve_config as resolve_oracle_config
 from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysql_config
+
+logger = logging.getLogger(__name__)
+
+# 下发给模型的错误摘要上限：驱动报错可能很长，超长文本对模型没有用
+_MAX_ERROR_CHARS = 500
+# 驱动/OCP 客户端的原始报错里可能夹带 host:port、IP、连接串账号。这些不该进入模型
+# 上下文（agent 侧对自身异常同样只给通用文案，见 runner.py 的错误分支），只保留
+# 「SQL 语义错误」这类能让模型自纠的信息。
+_REDACTIONS = (
+    (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b"), "<host>"),
+    (re.compile(r"(?i)\b(password|passwd|pwd)\b\s*[=:]\s*\S+"), r"\1=<redacted>"),
+    (re.compile(r"\b[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+(?:#[A-Za-z0-9_.\-]+)?"), "<account>"),
+)
+# 连接类失败只给分类：这类报错天然带环境信息，且模型重试也大概率无解
+_CONNECTION_HINTS = (
+    "connect", "connection", "timed out", "timeout", "refused", "unreachable",
+    "broken pipe", "reset by peer", "ora-125", "ora-12170", "2003", "10060", "10061",
+)
 
 
 def _ok(**payload: object) -> str:
     return json.dumps({"ok": True, **payload}, ensure_ascii=False, default=str)
 
 
-def _fail(error: str) -> str:
-    return json.dumps({"ok": False, "error": error}, ensure_ascii=False)
+def _fail(error: str, *, kind: str = "error") -> str:
+    return json.dumps({"ok": False, "error": error, "error_kind": kind}, ensure_ascii=False)
+
+
+def _redact_error_text(text: str) -> str:
+    for pattern, repl in _REDACTIONS:
+        text = pattern.sub(repl, text)
+    return text[:_MAX_ERROR_CHARS]
+
+
+def _classify_error(exc: BaseException) -> tuple[str, str]:
+    """把异常映射成（error_kind, 可下发给模型的摘要）。"""
+    if isinstance(exc, ReadOnlyViolation):
+        # 只读违例是我们自己的中文说明，本身就是给模型的最优提示
+        return "read_only", str(exc)
+    if isinstance(exc, SqlExecutionError):
+        text = str(exc) or type(exc).__name__
+        if any(hint in text.lower() for hint in _CONNECTION_HINTS):
+            return "connection", "数据库连接失败或查询超时（网络/鉴权/实例不可达），可稍后重试或换集群"
+        # SQL 语义错误（未知列、语法错误等）必须保留：模型靠它换写法自纠；仅做脱敏
+        return "sql", _redact_error_text(text)
+    if isinstance(exc, OcpClientError):
+        return "ocp", _redact_error_text(str(exc) or type(exc).__name__)
+    if isinstance(exc, KeyError):
+        return "payload", f"响应缺少字段: {exc}"
+    return "internal", f"工具内部错误（{type(exc).__name__}）"
+
+
+def _error(exc: BaseException) -> str:
+    """工具内异常 → ok:false 观察结果：分类 + 脱敏 + 短 error_id。
+
+    旧实现直接下发 ``str(e)``，会把驱动里的主机、账号、连接串片段一并交给模型。
+    """
+    error_id = uuid.uuid4().hex[:8]
+    kind, message = _classify_error(exc)
+    logger.warning("工具执行失败 [error_id=%s] %s: %s", error_id, type(exc).__name__, exc)
+    return _fail(f"{message}（错误编号 {error_id}）", kind=kind)
 
 def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str, sql_config: SqlConfig):
     """按配置返回 SQL 执行器。
@@ -130,7 +187,7 @@ def build_tools(
                 filtered_items.append(out)
             return _ok(items=filtered_items)
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
 
     @tool(args_schema=SlowSqlInput)
@@ -155,7 +212,7 @@ def build_tools(
             ]
             return _ok(items=filtered_items)
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
     @tool(args_schema=FullSqlTextInput)
     def get_full_sql_text(cluster_id: int, tenant_id: int, sql_id: str,start_time: str,end_time: str) -> str:
@@ -169,7 +226,7 @@ def build_tools(
             tables = data["tables"]
             return _ok(items=[{"sqlText":sql_text,"dbName":db_name,"tables":tables}])
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
     @tool(args_schema=SqlTopPlanInput)
     def get_sql_top_plan(cluster_id: int, tenant_id: int, sql_id: str,start_time: str, end_time: str) -> str:
@@ -179,7 +236,9 @@ def build_tools(
         try:
             sql_top_plan_list = ocp.get_sql_top_plan(cluster_id, tenant_id, sql_id, start_time, end_time)
             if not sql_top_plan_list:
-                return _ok(items=[{"message":"no data"}])
+                # 「查不到」不是成功：旧实现回 {"ok": true, "message": "no data"}，
+                # 审计里会被记成一次成功调用，模型也容易当成「已拿到计划」继续往下推。
+                return _fail("未获取到该 SQL 的计划 uid（可能未被采样到）", kind="not_found")
             else:
                 summary_lines = []
                 for idx, data in enumerate(sql_top_plan_list, start=1):
@@ -191,7 +250,7 @@ def build_tools(
                     )
                 return _ok(items=summary_lines)
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
     @tool(args_schema=SqlExplainInput)
     def get_sql_explain(cluster_id: int, tenant_id: int, uid: str,start_time: str,end_time: str) -> str:
@@ -201,14 +260,17 @@ def build_tools(
         try:
             data_list = ocp.get_sql_explain(cluster_id, tenant_id, uid, start_time, end_time)
             if not data_list:
-                return "未获取到执行计划结构数据\n"
+                # 同上：空计划必须是 ok:false。旧实现返回裸文本
+                # "未获取到执行计划结构数据\n"，tool_trace 对非 JSON 且不以
+                # Error: 开头的文本一律判成功（tool_trace.py:62-69）。
+                return _fail("未获取到执行计划结构数据（该 uid 可能已过期）", kind="not_found")
             else:
                 plan_data = data_list["data"]
                 plan_operation_summery = data_list["planOperationSummery"]
                 root_operations = data_list["rootOperations"]
                 return _ok(items=[{"plan_data": plan_data, "plan_operation_summery": plan_operation_summery, "root_operations": root_operations}])
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
     @tool(args_schema=ExecuteSqlInput)
     def execute_sql(tenant_name: str, cluster_name: str, db_name: str, sql: str, tenant_type: str) -> str:
@@ -222,7 +284,7 @@ def build_tools(
             rows = [] if not send_row_data else r.rows
             return _ok(columns=r.columns, rows=rows, row_count=r.row_count, truncated=r.truncated)
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
     @tool(args_schema=TableDDLInput)
     def get_table_ddl(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str,table_name: str) -> str:
@@ -234,7 +296,7 @@ def build_tools(
             r = sql_executor.table_ddl(table_name)
             return _ok(columns=r.columns, rows=r.rows, row_count=r.row_count, truncated=r.truncated)
         except Exception as e:
-            return _fail(str(e) or type(e).__name__)
+            return _error(e)
 
     return [get_tenant_info, get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, execute_sql,get_table_ddl]+file_tools
 

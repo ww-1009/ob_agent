@@ -9,12 +9,13 @@ from abc import ABC
 
 import pytest
 
-from app.agent.tools import build_tools
+from app.agent.tools import _classify_error, _error, build_tools
 from app.config import SqlConfig
 from app.tools.base import OcpClientError, SqlExecutionError
 from app.tools.ocp.mock import MockOcpClient
 from app.tools.ocp.real import _elapsed_us, _first_present, _ms_to_us, _normalize_mode
 from app.tools.sql.base import PooledSqlExecutor
+from app.tools.sql.guard import ReadOnlyViolation
 from app.tools.sql.oracle import OracleSqlExecutor, resolve_config as resolve_oracle_config
 from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysql_config
 
@@ -47,6 +48,23 @@ def tools():
 
 def test_build_tools_registers_expected_names(tools):
     assert set(tools) == _EXPECTED_TOOLS
+
+
+def test_tool_metadata_is_in_sync_with_registered_tools():
+    """TOOL_STATUS / TOOL_LABEL 必须跟着工具注册走：漏一处就少进度语或标签。
+
+    这几份清单原先靠人工同步（prompt 里的工具说明、runner.TOOL_STATUS、
+    tool_labels.TOOL_LABEL、confirm.CONFIRM_TOOL_LABELS），容易漂移；
+    这里把「等于注册集合」和「审批只覆盖执行 SQL」固化下来。
+    """
+    from app.agent.confirm import CONFIRM_TOOL_LABELS
+    from app.agent.runner import TOOL_STATUS
+    from app.agent.tool_labels import TOOL_LABEL
+
+    assert set(TOOL_STATUS) == _EXPECTED_TOOLS
+    assert set(TOOL_LABEL) == _EXPECTED_TOOLS
+    # 审批只覆盖执行 SQL：OCP 元数据与文档读取不需要人工确认
+    assert set(CONFIRM_TOOL_LABELS) == {"execute_sql"}
 
 
 def test_get_tenant_info_ok(tools):
@@ -131,3 +149,69 @@ def test_oracle_resolve_config_fills_tenant_and_service_name():
         SqlConfig(username="ro@t2", service_name="t1#c1"), "t1"
     )
     assert explicit.username == "ro@t2" and explicit.service_name == "t1#c1"
+
+
+# ---- 工具错误：分类 + 脱敏 + 「查不到」不再是成功 ----------------------------
+
+
+def test_connection_error_is_generic_and_leaks_nothing():
+    exc = SqlExecutionError(
+        "SQL 执行失败: (2003, \"Can't connect to MySQL server on '10.1.2.3' (111)\")"
+    )
+    kind, message = _classify_error(exc)
+    assert kind == "connection"
+    assert "10.1.2.3" not in message and "connect" not in message.lower()
+
+
+def test_sql_error_keeps_semantics_but_redacts_env_details():
+    exc = SqlExecutionError(
+        "SQL 执行失败: (1054, \"Unknown column 'x' in 'field list' "
+        "(ro@t1#c1@10.1.2.3:3306 password=hunter2)\")"
+    )
+    kind, message = _classify_error(exc)
+    assert kind == "sql"
+    assert "Unknown column 'x'" in message  # 模型靠它换写法自纠，必须保留
+    for secret in ("10.1.2.3", "ro@t1#c1", "hunter2"):
+        assert secret not in message
+
+
+def test_error_payload_hides_raw_message_and_carries_error_id():
+    payload = json.loads(_error(RuntimeError("boom-内部细节")))
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "internal"
+    assert "boom-内部细节" not in payload["error"]
+    assert "错误编号" in payload["error"]
+
+
+def test_read_only_violation_keeps_actionable_message():
+    kind, message = _classify_error(ReadOnlyViolation("只读模式禁止语句类型: delete"))
+    assert kind == "read_only" and "delete" in message
+
+
+def test_execute_sql_write_reports_read_only_kind(tools):
+    data = json.loads(
+        tools["execute_sql"].invoke({**_EXEC_ARGS, "sql": "delete from orders"})
+    )
+    assert data["ok"] is False and data["error_kind"] == "read_only"
+
+
+class _EmptyPlanOcp(MockOcpClient):
+    """计划接口返回空：验证「查不到」必须是 ok:false（旧实现返回裸文本，被审计记成成功）。"""
+
+    def get_sql_top_plan(self, *args, **kwargs):
+        return []
+
+    def get_sql_explain(self, *args, **kwargs):
+        return []
+
+
+def test_empty_plan_is_reported_as_failure():
+    built = {t.name: t for t in build_tools(_EmptyPlanOcp(), SqlConfig(provider="mock"))}
+    top = json.loads(
+        built["get_sql_top_plan"].invoke({"cluster_id": 1, "tenant_id": 1001, "sql_id": "sq-1"})
+    )
+    assert top["ok"] is False and top["error_kind"] == "not_found"
+    explain = json.loads(
+        built["get_sql_explain"].invoke({"cluster_id": 1, "tenant_id": 1001, "uid": "u-1"})
+    )
+    assert explain["ok"] is False and explain["error_kind"] == "not_found"
