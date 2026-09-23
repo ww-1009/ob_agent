@@ -225,7 +225,7 @@ export function useChat() {
     }
   }
 
-  async function decideConfirm(approved) {
+  async function decideConfirm(approved, reason = '') {
     const confirm = pendingConfirm.value
     if (!confirm || confirm.state === 'deciding') return
     if (confirm.state === 'resolved') {
@@ -246,9 +246,21 @@ export function useChat() {
         pendingConfirm.value = null
         return
       }
-      if (err instanceof ConfirmHttpError && (err.status === 404 || err.status === 409 || err.status === 503)) {
-        // 请求已处理/不存在/通道不可用：不阻塞，关闭卡片（后端已按拒绝或已答复继续）
+      if (err instanceof ConfirmHttpError && err.status === 409) {
+        // 已答复/已被处理：幂等，安静关闭
         pendingConfirm.value = null
+        return
+      }
+      if (err instanceof ConfirmHttpError && (err.status === 404 || err.status === 503)) {
+        if (reason === 'timeout') {
+          // 本地倒计时到期的尽力投递：服务端通常已按超时拒绝，静默收尾
+          pendingConfirm.value = null
+          return
+        }
+        // 不能再假装"已答复"：后端并未接受这次审批，把原因留在卡片上让用户可见
+        confirm.error = err.detail
+          || (err.status === 404 ? '确认请求已失效（可能已被处理或已过期）' : '确认通道不可用，请重试')
+        confirm.state = 'idle'
         return
       }
       confirm.error = (err && err.message) ? err.message : String(err)
