@@ -143,6 +143,8 @@ class SseStream:
                 with self._cv:
                     self.events.append(ev)
                     self._cv.notify_all()
+        except Exception:  # noqa: BLE001 - teardown 关流时读到已关闭的 fd 属预期，不该炸线程
+            pass
         finally:
             with self._cv:
                 self._finished = True

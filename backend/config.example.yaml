@@ -31,7 +31,7 @@ agent:
   send_row_data: true       # false 时送入 LLM 的结果不含行数据
   max_seconds: 180          # 单轮 agent 总时长兜底
   confirm_db_ops: true      # 变更类操作是否要人工确认（HITL 审批）
-  confirm_timeout_seconds: 120   # 等待人工确认的超时；超时按「拒绝」处理
+  confirm_timeout_seconds: 120   # 等待人工确认的超时；超时按「拒绝」处理。必须 < max_seconds（否则审批超时不会先触发）
   recursion_limit: 100      # langgraph 单轮图步数上限，防止工具调用打转
 memory:
   enabled: false            # true 时启用会话记忆（依赖 PostgreSQL，详见 README「会话记忆」）

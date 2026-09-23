@@ -202,7 +202,7 @@ cp backend/.env.example backend/.env
 | `agent`   | `send_row_data`                                          | 送入 LLM 的结果是否含行数据                                |
 | `agent`   | `max_seconds`                                            | 单轮 agent 执行总时长兜底                                |
 | `agent`   | `confirm_db_ops`                                         | 是否开启 `execute_sql` 人工审批（HITL）                   |
-| `agent`   | `confirm_timeout_seconds`                                | 审批超时（超时默认拒绝）                                    |
+| `agent`   | `confirm_timeout_seconds`                                | 审批超时（超时默认拒绝）。**必须小于 `max_seconds`**：否则启动即失败——相等或更大时整轮超时总是先触发，审批超时永远轮不到 |
 | `agent`   | `recursion_limit`                                        | langgraph 图最大递归步数                               |
 | `memory`  | `enabled`                                                | 是否把会话持久化到 PostgreSQL（PG 可用时置 `true`）              |
 | `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PG 连接信息；给 `dsn` 可整体覆盖分项                          |

@@ -87,3 +87,37 @@ def test_llm_is_configured_strips_whitespace():
     assert LLMConfig(base_url="x", api_key="k", model="m").is_configured is True
     assert LLMConfig(base_url="  ", api_key="k", model="m").is_configured is False
     assert LLMConfig().is_configured is False
+
+
+# ---- 审批超时必须严格短于整轮上限（否则审批超时永远不会先触发）----------------
+
+_MISSING_CONFIG = "/nonexistent-ob-agent-test-config.yaml"
+
+
+def test_default_confirm_timeout_is_strictly_below_max_seconds():
+    s = load_settings(config_path=_MISSING_CONFIG, env={"OCP_PROVIDER": "mock"})
+    assert 0 < s.agent.confirm_timeout_seconds < s.agent.max_seconds
+
+
+def test_confirm_timeout_not_less_than_max_seconds_raises(tmp_path):
+    path = _write_yaml(
+        tmp_path,
+        "agent:\n  confirm_db_ops: true\n  max_seconds: 60\n  confirm_timeout_seconds: 60\n",
+    )
+    with pytest.raises(ValueError):
+        load_settings(config_path=path, env={})
+
+
+def test_confirm_timeout_equal_to_max_is_allowed_when_hitl_disabled(tmp_path):
+    path = _write_yaml(
+        tmp_path,
+        "agent:\n  confirm_db_ops: false\n  max_seconds: 60\n  confirm_timeout_seconds: 60\n",
+    )
+    s = load_settings(config_path=path, env={})
+    assert s.agent.confirm_timeout_seconds == 60
+
+
+def test_confirm_timeout_must_be_positive(tmp_path):
+    path = _write_yaml(tmp_path, "agent:\n  confirm_timeout_seconds: 0\n")
+    with pytest.raises(ValueError):
+        load_settings(config_path=path, env={})

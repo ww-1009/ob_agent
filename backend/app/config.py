@@ -79,7 +79,9 @@ class AgentConfig:
     max_seconds: int = 120
     # 数据库操作人工确认（HITL）：true 时 DB 工具执行前需前端批准
     confirm_db_ops: bool = True
-    confirm_timeout_seconds: int = 120
+    # 等待人工确认的超时；必须严格小于 max_seconds（load_settings 会校验），
+    # 否则整轮的 asyncio.timeout 总是先到，审批超时永远不会触发
+    confirm_timeout_seconds: int = 90
     # langgraph 图最大递归步数（防失控循环）：过低会误触顶（旧版 langgraph 默认 25），过高失去保护
     recursion_limit: int = 100
 
@@ -173,6 +175,25 @@ def _maybe_load_dotenv(dotenv_path: Path | None) -> None:
     load_dotenv(p, override=False)
 
 
+def _validate_agent(agent: AgentConfig) -> None:
+    """校验 agent 配置的自洽性（fail fast）。
+
+    审批超时必须严格短于整轮上限：两者相等时（旧默认值都是 120）审批超时永远不会
+    先触发，先到的是整轮的 asyncio.timeout，用户看到的是「执行超时」而不是「审批
+    超时」，人工确认形同虚设，审计里也看不出用户到底点没点。
+    """
+    if not agent.confirm_db_ops:
+        return
+    if agent.confirm_timeout_seconds <= 0:
+        raise ValueError("agent.confirm_timeout_seconds 必须大于 0")
+    if agent.confirm_timeout_seconds >= agent.max_seconds:
+        raise ValueError(
+            "agent.confirm_timeout_seconds 必须小于 agent.max_seconds："
+            f"当前 {agent.confirm_timeout_seconds} >= {agent.max_seconds}，"
+            "否则审批超时不会先触发，人工确认会退化成整轮执行超时"
+        )
+
+
 def load_settings(
     config_path: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -201,7 +222,7 @@ def load_settings(
     send_row_data_env = _env_nonempty(env, "SEND_ROW_DATA")
     memory_enabled_env = _env_nonempty(env, "MEMORY_ENABLED")
 
-    return Settings(
+    settings = Settings(
         ocp=OcpConfig(
             # 缺省 mock：无 config.yaml/.env 时「开箱即用」按 README 的离线演示跑通夹具，
             # 与 OcpConfig.provider 默认值及 sql_ro 保持一致（此前回落 real 会导致
@@ -247,7 +268,7 @@ def load_settings(
                 True,
             ),
             confirm_timeout_seconds=int(
-                _env_nonempty(env, "CONFIRM_TIMEOUT_SECONDS") or agent_y.get("confirm_timeout_seconds", 120)
+                _env_nonempty(env, "CONFIRM_TIMEOUT_SECONDS") or agent_y.get("confirm_timeout_seconds", 90)
             ),
             recursion_limit=int(
                 _env_nonempty(env, "RECURSION_LIMIT") or agent_y.get("recursion_limit", 100)
@@ -290,3 +311,5 @@ def load_settings(
             token=_env_nonempty(env, "AUTH_TOKEN") or auth_y.get("token", ""),
         ),
     )
+    _validate_agent(settings.agent)
+    return settings

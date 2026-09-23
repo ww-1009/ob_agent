@@ -78,7 +78,8 @@ async def stream_chat(
     max_seconds: int = 120,
     broker=None,
     confirm_enabled: bool = True,
-    confirm_timeout_seconds: float = 120,
+    # 默认严格小于 max_seconds：两者相等时审批超时永远轮不到触发（load_settings 会校验）
+    confirm_timeout_seconds: float = 90,
     recursion_limit: int = 100,
 ) -> AsyncIterator[dict]:
     """对历史消息运行 agent，产出对外事件流。单轮超时兜底（spec §8.4）。

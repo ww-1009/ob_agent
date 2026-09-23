@@ -195,7 +195,7 @@ cp backend/.env.example backend/.env
 | `agent`   | `send_row_data`                                          | Whether results passed to LLM contain row data  |
 | `agent`   | `max_seconds`                                            | Fallback limit for total execution time of a single agent turn |
 | `agent`   | `confirm_db_ops`                                         | Whether to enable human approval for `execute_sql` (HITL) |
-| `agent`   | `confirm_timeout_seconds`                                | Approval timeout (Defaults to rejection on timeout) |
+| `agent`   | `confirm_timeout_seconds`                                | Approval timeout (Defaults to rejection on timeout). **Must be less than `max_seconds`** — startup fails fast otherwise, since an equal/larger value would never fire before the whole-turn timeout |
 | `agent`   | `recursion_limit`                                        | Maximum recursion steps for langgraph           |
 | `memory`  | `enabled`                                                | Persist conversations to PostgreSQL (`true` when PG is available) |
 | `memory`  | `host`/`port`/`user`/`password`/`dbname`                 | PostgreSQL connection; set `dsn` to override the individual parts |
