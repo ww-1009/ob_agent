@@ -27,8 +27,9 @@ __all__ = ["MysqlSqlExecutor", "resolve_config", "close_all_executors"]
 def resolve_config(cfg: SqlConfig, tenant_name: str, cluster_name: str) -> SqlConfig:
     """把 sql_ro 的通用配置解析成「本租户可直连」的 MySQL 配置。
 
-    MySQL 模式的租户与集群写在用户名里：``user@tenant#cluster``（与 Oracle 走 DSN
-    的 service_name 不同）。配置里已含 ``@`` 就原样用，便于显式指定租户。
+    MySQL 模式的租户与集群写在用户名里：``user@tenant#cluster``（Oracle 模式则把
+    工具传入的 db_name 当作 DSN 的 service name，不写进用户名）。配置里已含 ``@``
+    就原样用，便于显式指定租户。
     """
     base = (cfg.username or "").strip()
     username = base if "@" in base else f"{base}@{tenant_name}#{cluster_name}"

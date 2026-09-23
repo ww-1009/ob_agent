@@ -18,9 +18,10 @@ sql_ro:
   connect_timeout: 5
   query_timeout_seconds: 10
   max_rows: 200
-  # ---- 以下两项仅 Oracle 模式租户使用；MySQL 模式忽略 ----
+  # ---- 以下一项仅 Oracle 模式租户使用；MySQL 模式忽略 ----
+  # Oracle 模式：DSN 的 service name 直接取工具传入的 db_name（即 execute_sql / get_table_ddl 的 db_name），
+  #   配置里不再需要 service_name；报 ORA-12514/12505 时说明 db_name 与该租户的 SERVICE_NAME 不一致。
   driver: oracledb          # oracledb（默认：瘦模式，免 Oracle 客户端库）| cx_oracle（需 Python<=3.10 + Instant Client）
-  service_name: ""          # Oracle 用 DSN 的 service name 指定租户；留空＝用租户名。报 ORA-12514/12505 时改填 "租户#集群" 或自定义 service name
 llm:
   base_url: "http://xxxxx"   # OpenAI 兼容
   api_key: "xxxxxxxx"

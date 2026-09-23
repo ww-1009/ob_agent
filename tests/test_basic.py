@@ -9,14 +9,18 @@ from abc import ABC
 
 import pytest
 
-from app.agent.tools import _classify_error, _error, build_tools
+from app.agent.tools import _classify_error, _create_db_connect, _error, build_tools
 from app.config import SqlConfig
 from app.tools.base import OcpClientError, SqlExecutionError
 from app.tools.ocp.mock import MockOcpClient
 from app.tools.ocp.real import _elapsed_us, _first_present, _ms_to_us, _normalize_mode
 from app.tools.sql.base import PooledSqlExecutor
 from app.tools.sql.guard import ReadOnlyViolation
-from app.tools.sql.oracle import OracleSqlExecutor, resolve_config as resolve_oracle_config
+from app.tools.sql.oracle import (
+    OracleSqlExecutor,
+    build_dsn as build_oracle_dsn,
+    resolve_config as resolve_oracle_config,
+)
 from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysql_config
 
 _EXPECTED_TOOLS = {
@@ -140,15 +144,38 @@ def test_mysql_resolve_config_builds_user_tenant_cluster():
     assert resolve_mysql_config(SqlConfig(username="ro@t2"), "t1", "c1").username == "ro@t2"
 
 
-def test_oracle_resolve_config_fills_tenant_and_service_name():
-    out = resolve_oracle_config(SqlConfig(username="ro"), "t1")
-    assert out.username == "ro@t1"
-    assert out.service_name == "t1"
-    # 显式配置优先
-    explicit = resolve_oracle_config(
-        SqlConfig(username="ro@t2", service_name="t1#c1"), "t1"
+def test_oracle_resolve_config_uses_tool_db_name_as_service_name():
+    # Oracle 模式的 DSN service name 取工具传入的 db_name（配置里已无 service_name 项）
+    out = resolve_oracle_config(
+        SqlConfig(host="obproxy", port=2883, username="ro", db_name="shop"), "t1"
     )
-    assert explicit.username == "ro@t2" and explicit.service_name == "t1#c1"
+    assert out.username == "ro@t1"
+    assert out.db_name == "shop"
+    assert build_oracle_dsn(out) == "obproxy:2883/shop"
+    # 账号已带 @ 原样保留（允许显式指定租户）
+    explicit = resolve_oracle_config(SqlConfig(username="ro@t2", db_name="shop"), "t1")
+    assert explicit.username == "ro@t2" and explicit.db_name == "shop"
+    # db_name 缺失时回退租户名（防御性兜底，正常调用不会发生）
+    assert resolve_oracle_config(SqlConfig(username="ro"), "t1").db_name == "t1"
+
+
+def test_oracle_connection_uses_tool_db_name_as_dsn_service_name():
+    # 端到端接线：工具传入的 db_name 就是该 Oracle 租户的 DSN service name
+    ex = _create_db_connect(
+        "t1",
+        "c1",
+        "shop",
+        "ORACLE",
+        SqlConfig(
+            provider="real",
+            host="{'c1': 'obproxy:2883'}",
+            username="ro",
+            password="pw",
+        ),
+    )
+    assert isinstance(ex, OracleSqlExecutor)
+    assert ex._cfg.username == "ro@t1"
+    assert build_oracle_dsn(ex._cfg) == "obproxy:2883/shop"
 
 
 # ---- 工具错误：分类 + 脱敏 + 「查不到」不再是成功 ----------------------------

@@ -92,7 +92,7 @@ def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant
       mock 与方言无关，因此 Oracle 租户在 mock 下同样可用（便于演示与自测）。
     - provider == "real"：按 host_map 把「集群名 → host:port」解析成本租户的连接串，
       MySQL 模式走 PyMySQL（用户名 user@tenant#cluster），Oracle 模式走 OCI 驱动
-      （租户信息走 DSN 的 service_name，用户名 user@tenant）。
+      （租户由 DSN 的 service name 路由，取本工具传入的 db_name；用户名 user@tenant）。
     解析失败抛 SqlExecutionError，由调用方的 try 转成 {"ok": false} 观察结果。
     """
     if tenant_type not in {"MYSQL", "ORACLE"}:
@@ -128,9 +128,9 @@ def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant
             # 基础账号：Oracle 由 resolve_config 补成 user@tenant；漏掉会让用户名变成 "@租户"
             username=sql_config.username,
             driver=sql_config.driver,
-            service_name=sql_config.service_name,
         )
-        # Oracle 模式：租户走 service_name，用户名补成 user@tenant
+        # Oracle 模式：DSN 的 service name 取本工具的 db_name（见 oracle.resolve_config），
+        # 用户名补成 user@tenant；这里不能再传 service_name —— 配置项已移除。
         return OracleSqlExecutor(resolve_oracle_config(oracle_cfg, tenant_name))
 
     # MySQL 模式：租户与集群写在用户名里 user@tenant#cluster

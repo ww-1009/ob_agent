@@ -82,15 +82,18 @@ def resolve_config(cfg: SqlConfig, tenant_name: str) -> SqlConfig:
     而是通过 DSN 的 service_name 让 ODP 路由到对应租户，用户名只带租户名。
 
     - username：配置里已含 ``@`` 就原样用，否则补成 ``user@tenant``
-    - service_name：未显式配置时用租户名；需要 ``租户#集群`` 或自定义 service name
-      时在 sql_ro.service_name 里显式指定
+    - service name：直接取工具传入的 ``cfg.db_name`` —— ``execute_sql`` /
+      ``get_table_ddl`` 的 ``db_name`` 参数就是本租户的 service name，配置里不再有
+      service name 这一项。Oracle 模式没有「库名」概念，所以解析结果写回
+      ``db_name`` 供 ``build_dsn`` 使用；``db_name`` 为空时回退租户名（防御性兜底，
+      正常调用不会为空）。
     """
     base = (cfg.username or "").strip()
     username = base if "@" in base else f"{base}@{tenant_name}"
     return replace(
         cfg,
         username=username,
-        service_name=(cfg.service_name or "").strip() or tenant_name,
+        db_name=(cfg.db_name or "").strip() or tenant_name,
     )
 
 
@@ -98,15 +101,17 @@ def build_dsn(cfg: SqlConfig) -> str:
     """拼 DSN：``host:port/service_name``。
 
     OceanBase 支持直接以 ``ODP 地址:端口/SERVICE_NAME`` 登录，ODP 再据此把连接路由到
-    对应租户（一个租户至多一个 SERVICE_NAME）。
+    对应租户（一个租户至多一个 SERVICE_NAME）。service name 由 ``resolve_config`` 从
+    工具传入的 ``db_name`` 落到 ``cfg.db_name``，故此处读 ``db_name``。
     """
-    return f"{cfg.host}:{cfg.port}/{cfg.service_name}"
+    return f"{cfg.host}:{cfg.port}/{cfg.db_name}"
 
 
 class OracleSqlExecutor(PooledSqlExecutor):
     """OCI 执行器；连接生命周期与只读语义全部继承自 ``PooledSqlExecutor``。
 
-    传入的 config 应已经过 ``resolve_config``：host/port/username/service_name 齐全。
+    传入的 config 应已经过 ``resolve_config``：host/port/username 齐全，
+    ``db_name`` 已落成 DSN 的 service name。
     """
 
     def _load_driver(self):
