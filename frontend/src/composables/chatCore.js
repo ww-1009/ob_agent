@@ -32,13 +32,15 @@ export function toMessageView(items) {
     }))
 }
 
-// 工具轨迹/审计行的次要信息：「N 行 · 已截断 · 12 ms」
+// 工具轨迹/审计行的次要信息：「N 行 · 已截断 · 12 ms · 算子 3」
 export function toolMeta(t) {
   if (!t) return ''
   const parts = []
   if (Number.isInteger(t.rows)) parts.push(`${t.rows} 行`)
   if (t.truncated) parts.push('结果已截断')
   if (Number.isFinite(t.duration_ms)) parts.push(`${t.duration_ms} ms`)
+  // 执行计划轨迹：在折叠状态下也能看出计划规模
+  if (t.plan && Number.isFinite(t.plan.node_count)) parts.push(`算子 ${t.plan.node_count}`)
   return parts.join(' · ')
 }
 

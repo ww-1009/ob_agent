@@ -263,4 +263,26 @@ describe('useChat', () => {
     expect(chat.pendingConfirm.value).toBeNull()
     await finish()
   })
+
+  it('执行计划事件：plan 被存进工具轨迹，其余工具为 null', async () => {
+    const chat = useChat()
+    const p = chat.send('看下执行计划')
+    const rec = recs[0]
+    const plan = {
+      uid: 'plan-8f3a1c02',
+      node_count: 2,
+      nodes: [{ id: '1', depth: 0, operator: 'EXCHANGE OUT' }],
+      summary: [],
+      truncated: false,
+    }
+    rec.onEvent({ type: 'tool', phase: 'end', id: 'ab12cd', name: 'get_sql_explain', ok: true, plan })
+    rec.onEvent({ type: 'tool', phase: 'end', id: 'ef34gh', name: 'get_slow_sql', ok: true })
+    rec.onEvent({ type: 'done' })
+    rec.resolve()
+    await p
+
+    const tools = plainMsgs(chat)[1].tools
+    expect(tools[0].plan).toEqual(plan)
+    expect(tools[1].plan).toBeNull() // 没有 plan 的工具不占位，ToolTrace 不渲染计划块
+  })
 })

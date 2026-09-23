@@ -238,6 +238,33 @@ code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, m
   background: var(--panel); border: 1px solid var(--code-line); border-radius: 8px; max-height: 220px; overflow: auto;
 }
 
+/* 执行计划视图（get_sql_explain 轨迹内）：按 depth 缩进的算子树 + 算子汇总表 */
+.plan {
+  margin: 0 0 8px; padding: 8px; font-size: 12px;
+  background: var(--panel); border: 1px solid var(--code-line); border-radius: 8px;
+}
+.plan-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.plan-title { font-weight: 600; }
+.plan-uid { color: var(--text-2); }
+.plan-sub { color: var(--text-2); }
+.plan-warn { color: #b7791f; }
+.plan-tree { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }
+.plan-node + .plan-node { border-top: 1px dashed var(--code-line); }
+.plan-line { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.plan-op { font-weight: 600; white-space: nowrap; }
+.plan-node.hottest .plan-op { color: var(--err); }
+.plan-name { color: var(--text-2); }
+.plan-nums { margin-left: auto; color: var(--text-2); white-space: nowrap; }
+.plan-pct { color: var(--text-2); }
+.plan-prop { color: var(--text-2); word-break: break-word; opacity: 0.85; }
+.plan-summary { width: 100%; margin-top: 8px; border-collapse: collapse; }
+.plan-summary th, .plan-summary td {
+  padding: 3px 6px; border-bottom: 1px solid var(--code-line); text-align: right;
+}
+.plan-summary th:first-child, .plan-summary td:first-child { text-align: left; }
+.plan-summary th { color: var(--text-2); font-weight: 600; }
+.plan-summary tr:last-child td { border-bottom: 0; }
+
 /* 工具审计面板（右侧抽屉） */
 .audit-panel {
   flex: 0 0 380px; display: flex; flex-direction: column;

@@ -169,6 +169,8 @@ export function useChat() {
               truncated: ev.truncated === true,
               approved: (ev.approved === true || ev.approved === false) ? ev.approved : null,
               duration_ms: Number.isFinite(ev.duration_ms) ? ev.duration_ms : null,
+              // 只有 get_sql_explain 会带归一化计划；其余工具为 null，ToolTrace 不渲染计划块
+              plan: (ev.plan && typeof ev.plan === 'object') ? ev.plan : null,
             }]
           } else if (ev.type === 'confirm_request') {
             pendingConfirm.value = {

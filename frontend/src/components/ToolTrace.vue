@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import { toolMeta } from '../composables/chatCore.js'
+import PlanView from './PlanView.vue'
 
 defineProps({
   tools: { type: Array, default: () => [] },
@@ -46,6 +47,8 @@ function argsText(t) {
       </button>
       <div v-if="isOpen(t.id || t.name)" class="trace-body">
         <div v-if="t.error" class="trace-error">⚠ {{ t.error }}</div>
+        <!-- 只有 get_sql_explain 的轨迹带 plan：展示算子树与代价占比 -->
+        <PlanView v-if="t.plan" :plan="t.plan" />
         <pre class="trace-args">{{ argsText(t) }}</pre>
       </div>
     </div>
