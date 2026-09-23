@@ -12,20 +12,17 @@
 from __future__ import annotations
 
 import threading
-import weakref
 
 from app.config import SqlConfig
 from app.tools.base import QueryResult, SqlExecutionError
-from app.tools.sql.guard import assert_read_only
+from app.tools.sql.guard import assert_read_only, assert_safe_identifier
 
-# 进程内所有真实执行器（弱引用）：应用关闭时统一释放长连接
-_LIVE_EXECUTORS: "weakref.WeakSet[RealSqlExecutor]" = weakref.WeakSet()
+# 长连接注册表（MySQL 与 Oracle 执行器共用）。close_all_executors 在此一并重新
+# 导出，保持 `from app.tools.sql.real import close_all_executors` 这类旧调用方可用；
+# 应用装配请直接从 app.tools.sql.registry 导入。
+from app.tools.sql.registry import close_all_executors, register
 
-
-def close_all_executors() -> None:
-    """关闭所有存活执行器的长连接；由应用 lifespan 的关闭钩子调用。"""
-    for executor in list(_LIVE_EXECUTORS):
-        executor.close()
+__all__ = ["RealSqlExecutor", "close_all_executors"]
 
 
 class RealSqlExecutor:
@@ -33,7 +30,7 @@ class RealSqlExecutor:
         self._cfg = config
         self._conn = None
         self._lock = threading.Lock()
-        _LIVE_EXECUTORS.add(self)
+        register(self)
 
     def _connect(self):
         try:
@@ -116,6 +113,14 @@ class RealSqlExecutor:
             raise
         except Exception as e:  # 连接/执行失败 → 清晰错误
             raise SqlExecutionError(f"SQL 执行失败: {e}") from e
+
+    def table_ddl(self, table_name: str) -> QueryResult:
+        """表结构与索引：MySQL 模式下 SHOW CREATE TABLE 一次给全。
+
+        表名只能拼进 SQL（query 契约不支持绑定参数），故先过标识符白名单。
+        """
+        safe = assert_safe_identifier(table_name, "表名")
+        return self.query(f"show create table {safe}")
 
     def explain(self, sql: str) -> QueryResult:
         assert_read_only(sql)

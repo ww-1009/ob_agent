@@ -50,6 +50,13 @@ class SqlConfig:
     connect_timeout: int = 5
     query_timeout_seconds: int = 10
     max_rows: int = 200
+    # ---- 以下两项仅 Oracle 模式租户使用；MySQL 模式下被忽略 ----
+    # driver: OCI 驱动（oracledb | cx_oracle）。默认 oracledb：瘦模式免客户端库，
+    #         且 cx_Oracle 无 Python 3.11+ 轮子（详见 tools/sql/oracle.py）。
+    driver: str = "oracledb"
+    # service_name: Oracle 模式由 DSN 的 service name 指定租户；留空则用租户名。
+    #         需要「租户#集群」或 DBA 自定义的 service name 时在此显式指定。
+    service_name: str = ""
 
 
 @dataclass
@@ -212,6 +219,10 @@ def load_settings(
             password=_env_nonempty(env, "SQL_RO_PASSWORD") or sql_ro_y.get("password", ""),
             connect_timeout=int(sql_ro_y.get("connect_timeout", 5)),
             query_timeout_seconds=int(sql_ro_y.get("query_timeout_seconds", 10)),
+            # max_rows 此前只在两个 README 与 YAML 里出现，代码从未读取 → 改 YAML 无效
+            max_rows=int(sql_ro_y.get("max_rows", 200)),
+            driver=_env_nonempty(env, "SQL_RO_DRIVER") or sql_ro_y.get("driver", "oracledb"),
+            service_name=_env_nonempty(env, "SQL_RO_SERVICE_NAME") or sql_ro_y.get("service_name", ""),
         ),
         llm=LLMConfig(
             base_url=_env_nonempty(env, "LLM_BASE_URL") or llm_y.get("base_url", ""),

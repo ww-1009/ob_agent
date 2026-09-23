@@ -17,6 +17,7 @@ from app.config import SqlConfig, load_settings
 from app.tools.base import OcpClient, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import assert_read_only
 from app.tools.sql.mock import MockSqlExecutor
+from app.tools.sql.oracle import OBOracleSqlExecutor, resolve_config
 from app.tools.sql.real import RealSqlExecutor
 
 
@@ -30,14 +31,15 @@ def _fail(error: str) -> str:
 def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str, sql_config: SqlConfig):
     """按配置返回 SQL 执行器。
 
-    - Oracle 租户暂不支持（mock/real 一致返回 None，由调用方给出提示）
-    - provider != "real"（即 mock）：直接用固定夹具的 MockSqlExecutor，使 mock 模式离线可用
-    - provider == "real"：按 host_map 把「集群名 → host:port」解析成本租户的连接串
+    - provider != "real"（即 mock）：直接用固定夹具的 MockSqlExecutor，使 mock 模式离线可用。
+      mock 与方言无关，因此 Oracle 租户在 mock 下同样可用（便于演示与自测）。
+    - provider == "real"：按 host_map 把「集群名 → host:port」解析成本租户的连接串，
+      MySQL 模式走 PyMySQL（用户名 user@tenant#cluster），Oracle 模式走 OCI 驱动
+      （租户信息走 DSN 的 service_name，用户名 user@tenant）。
     解析失败抛 SqlExecutionError，由调用方的 try 转成 {"ok": false} 观察结果。
     """
-    if tenant_type != "MYSQL":
-        # todo:待完善oracle租户数据库连接
-        return None
+    if tenant_type not in {"MYSQL", "ORACLE"}:
+        raise SqlExecutionError(f"未知租户类型: {tenant_type}（可选 MYSQL | ORACLE）")
 
     if sql_config.provider != "real":
         return MockSqlExecutor()
@@ -52,16 +54,31 @@ def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant
             f"sql_ro.host_map 中没有集群 {cluster_name}（已有: {', '.join(sorted(host_map)) or '空'}）"
         )
     host, _, port = str(entry).partition(':')
-    user_str = f'{sql_config.username}@{tenant_name}#{cluster_name}'
-    return RealSqlExecutor(SqlConfig(
+    common = dict(
         provider="real",
         host=host,
         port=int(port) if port else sql_config.port,
         db_name=db_name,
-        username=user_str,
         password=sql_config.password,
         connect_timeout=sql_config.connect_timeout,
         query_timeout_seconds=sql_config.query_timeout_seconds,
+        max_rows=sql_config.max_rows,
+    )
+
+    if tenant_type == "ORACLE":
+        oracle_cfg = SqlConfig(
+            **common,
+            # 基础账号：Oracle 由 resolve_config 补成 user@tenant；漏掉会让用户名变成 "@租户"
+            username=sql_config.username,
+            driver=sql_config.driver,
+            service_name=sql_config.service_name,
+        )
+        # Oracle 模式：租户走 service_name，用户名补成 user@tenant
+        return OBOracleSqlExecutor(resolve_config(oracle_cfg, tenant_name))
+
+    return RealSqlExecutor(SqlConfig(
+        **common,
+        username=f'{sql_config.username}@{tenant_name}#{cluster_name}',
     ))
 
 def build_tools(
@@ -89,8 +106,7 @@ def build_tools(
         executor = executor_cache.get(key)
         if executor is None:
             executor = _create_db_connect(tenant_name, cluster_name, db_name, tenant_type, sql_ro_config)
-            if executor is not None:  # Oracle 租户返回 None，不缓存
-                executor_cache[key] = executor
+            executor_cache[key] = executor
         return executor
 
     @tool
@@ -195,14 +211,11 @@ def build_tools(
     @tool(args_schema=ExecuteSqlInput)
     def execute_sql(tenant_name: str, cluster_name: str, db_name: str, sql: str, tenant_type: str) -> str:
         """连接数据库执行查询操作"""
-        assert_read_only(sql)
-        # 连接解析也必须在 try 内：否则 host_map 缺键等异常会抛出工具之外，
-        # 违反「工具异常一律转 ok:false」的约定并中断 agent 轮次。
+        # assert_read_only 与连接解析都必须在 try 内：否则只读违例（写 SQL）、host_map
+        # 缺键等异常会抛出工具之外，违反「工具异常一律转 ok:false」的约定并中断 agent 轮次。
         try:
+            assert_read_only(sql)
             sql_executor = _db_connect(tenant_name, cluster_name, db_name, tenant_type)
-            if sql_executor is None:
-                # todo:待完善oracle租户数据库连接
-                return "暂不支持查询oracle租户"
             r = sql_executor.query(sql)
             rows = [] if not send_row_data else r.rows
             return _ok(columns=r.columns, rows=rows, row_count=r.row_count, truncated=r.truncated)
@@ -212,16 +225,12 @@ def build_tools(
     @tool(args_schema=TableDDLInput)
     def get_table_ddl(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str,table_name: str) -> str:
         """查询表结构与索引"""
+        # 方言差异（MySQL 的 SHOW CREATE TABLE / Oracle 的 DBMS_METADATA）由执行器
+        # 自己决定，这里不再按 tenant_type 分支。
         try:
-            # logger.info(f"Calling tool: execute_sql  with arguments: {sql}")
-            if tenant_type == "MYSQL":
-                sql_executor = _db_connect(tenant_name, cluster_name, db_name, tenant_type)
-                r = sql_executor.query(f"show create table {table_name};")
-                return _ok(columns=r.columns, rows=r.rows, row_count=r.row_count, truncated=r.truncated)
-            else:
-                # todo:待完善oracle租户数据库连接
-                # logger.warning(f"oracle租户连接功能待开发")
-                return "暂不支持查询oracle租户"
+            sql_executor = _db_connect(tenant_name, cluster_name, db_name, tenant_type)
+            r = sql_executor.table_ddl(table_name)
+            return _ok(columns=r.columns, rows=r.rows, row_count=r.row_count, truncated=r.truncated)
         except Exception as e:
             return _fail(str(e) or type(e).__name__)
 

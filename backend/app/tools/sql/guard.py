@@ -22,6 +22,8 @@ _FOR_UPDATE = re.compile(
 )
 _INTO_FILE = re.compile(r"\binto(?:\s|/\*.*?\*/)*(?:outfile|dumpfile)\b", re.I | re.S)
 _MULTI_STMT = re.compile(r";\s*\S")
+# 表名/标识符：允许可选的 schema 前缀，字符集取 OceanBase MySQL 与 Oracle 的并集
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*(?:\.[A-Za-z_][A-Za-z0-9_$#]*)?$")
 
 
 class ReadOnlyViolation(SqlExecutionError):
@@ -59,3 +61,18 @@ def assert_read_only(sql: str) -> None:
     # 多语句检查
     if _MULTI_STMT.search(cleaned):
         raise ReadOnlyViolation("多语句/带分号的额外语句不被允许")
+
+
+def assert_safe_identifier(name: str, kind: str = "标识符") -> str:
+    """校验表名等标识符并返回去掉引号包裹的形式。
+
+    表结构类工具（show create table / dbms_metadata.get_ddl）只能把表名拼进 SQL
+    字符串（执行器的 query(sql) 契约不支持绑定参数），所以这里用严格白名单挡住拼接
+    注入。允许 `schema.name` 形式，字符集取 MySQL 与 Oracle 的并集。
+    """
+    n = (name or "").strip().strip("`\"")
+    if not _IDENTIFIER.match(n):
+        raise ReadOnlyViolation(
+            f"{kind}不合法: {name!r}（只允许字母/数字/_/$/#，可带一个 schema 前缀）"
+        )
+    return n

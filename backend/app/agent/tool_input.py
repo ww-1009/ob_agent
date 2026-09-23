@@ -84,7 +84,7 @@ class ExecuteSqlInput(BaseModel):
     tenant_name: str = Field(description="租户名")
     db_name: str = Field(description="数据库名")
     sql: str = Field(description="需要执行的查询SQL")
-    tenant_type: Literal["MYSQL", "ORACLE"] = Field(description="租户类型")
+    tenant_type: Literal["MYSQL", "ORACLE"] = Field(description="租户类型。MYSQL 用 LIMIT/反引号/SHOW CREATE TABLE；ORACLE 用 FETCH FIRST/无引号/不加 LIMIT")
 
 
 class SqlExplainInput(BaseModel):
@@ -99,5 +99,5 @@ class TableDDLInput(BaseModel):
     cluster_name: str = Field(description="集群名")
     tenant_name: str = Field(description="租户名")
     db_name: str = Field(description="数据库名")
-    tenant_type: Literal["MYSQL", "ORACLE"] = Field(description="租户类型")
+    tenant_type: Literal["MYSQL", "ORACLE"] = Field(description="租户类型。MYSQL 走 SHOW CREATE TABLE；ORACLE 走 DBMS_METADATA.GET_DDL")
     table_name: str = Field(description="表名")

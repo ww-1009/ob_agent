@@ -16,7 +16,7 @@ from app.api.threads import make_threads_router
 from app.config import Settings, load_settings
 from app.memory import MemoryRuntime, open_memory
 from app.tools.ocp import get_ocp_client
-from app.tools.sql.real import close_all_executors
+from app.tools.sql.registry import close_all_executors
 
 def create_app(
     settings: Settings | None = None,

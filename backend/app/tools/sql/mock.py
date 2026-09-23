@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 from app.tools.base import QueryResult, SqlExecutionError
-from app.tools.sql.guard import assert_read_only
+from app.tools.sql.guard import assert_read_only, assert_safe_identifier
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 
@@ -42,8 +42,9 @@ class MockSqlExecutor:
         body = self._strip_prefix(sql, "explain")  # explain 交给 explain()
         if body is not None:
             return self.explain(body)
-        if _SHOW_CREATE.match(sql):
-            return self._show_create_table(sql)
+        m = _SHOW_CREATE.match(sql)
+        if m:
+            return self.table_ddl(m.group("name"))
         table = self._table_of(sql)
         if table is None:
             raise SqlExecutionError("无法解析 FROM 表名")
@@ -152,13 +153,16 @@ class MockSqlExecutor:
                 return "varchar(64)"
         return "varchar(64)"
 
-    def _show_create_table(self, sql: str) -> QueryResult:
+    def table_ddl(self, table_name: str) -> QueryResult:
+        """合成表结构。dialect 无关：Oracle 租户在 mock 模式下也走这里。"""
+        safe = assert_safe_identifier(table_name, "表名")
+        return self._show_create_table(safe.split(".")[-1])
+
+    def _show_create_table(self, table_name: str) -> QueryResult:
         """由 sample_tables.json 合成 SHOW CREATE TABLE 结果（列类型按取值推断，首列为主键）。"""
-        m = _SHOW_CREATE.match(sql)
-        table = m.group("name").split(".")[-1].strip("`")
-        data = self._tables().get(table.lower())
+        data = self._tables().get(table_name.lower())
         if data is None:
-            raise SqlExecutionError(f"mock 中不存在表: {table}")
+            raise SqlExecutionError(f"mock 中不存在表: {table_name}")
 
         columns = data["columns"]
         rows = data.get("rows") or []
@@ -170,8 +174,8 @@ class MockSqlExecutor:
         ]
         if columns:
             lines.append(f"  PRIMARY KEY (`{columns[0]}`)")
-        ddl = f"CREATE TABLE `{table}` (\n" + ",\n".join(lines) + "\n) DEFAULT CHARSET = utf8mb4"
-        return QueryResult(columns=["Table", "Create Table"], rows=[[table, ddl]])
+        ddl = f"CREATE TABLE `{table_name}` (\n" + ",\n".join(lines) + "\n) DEFAULT CHARSET = utf8mb4"
+        return QueryResult(columns=["Table", "Create Table"], rows=[[table_name, ddl]])
 
     def _select_audit(self, sql: str) -> QueryResult:
         p = self._data_dir / "slow_sqls.json"
