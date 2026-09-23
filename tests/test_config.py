@@ -14,7 +14,7 @@ def _write_yaml(tmp_path: Path, text: str) -> str:
 def test_defaults_are_mock_when_no_file(tmp_path):
     s = load_settings(config_path=None, env={"OCP_PROVIDER": "mock"})
     assert s.ocp.provider == "mock"
-    assert s.sql.provider == "mock"
+    assert s.sql_ro.provider == "mock"
     assert s.llm.base_url == ""
     assert s.agent.send_row_data is True
     assert s.agent.max_seconds == 120
@@ -23,11 +23,11 @@ def test_defaults_are_mock_when_no_file(tmp_path):
 def test_yaml_is_loaded(tmp_path):
     path = _write_yaml(
         tmp_path,
-        "sql:\n  provider: real\n  max_rows: 50\nagent:\n  send_row_data: false\n",
+        "sql_ro:\n  provider: real\n  max_rows: 50\nagent:\n  send_row_data: false\n",
     )
     s = load_settings(config_path=path, env={})
-    assert s.sql.provider == "real"
-    assert s.sql.max_rows == 50
+    assert s.sql_ro.provider == "real"
+    assert s.sql_ro.max_rows == 50
     assert s.agent.send_row_data is False
 
 

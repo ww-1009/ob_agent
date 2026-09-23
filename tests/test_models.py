@@ -10,22 +10,6 @@ from app.tools.base import (
 )
 
 
-class _FakeOcpClient:
-    def get_topology(self):
-        return None
-
-    def list_slow_sql(self, tenant_id: str, top_n: int = 10):
-        return []
-
-
-class _FakeSqlExecutor:
-    def query(self, sql: str):
-        return None
-
-    def explain(self, sql: str):
-        return None
-
-
 def test_slow_sql_item_json_roundtrip():
     item = SlowSqlItem(
         sql_id="abc123",
@@ -85,6 +69,9 @@ def test_sql_execution_error_is_value_error():
 
 
 def test_protocols_are_runtime_checkable():
-    assert isinstance(_FakeOcpClient(), OcpClient)
-    assert isinstance(_FakeSqlExecutor(), SqlExecutor)
+    from app.tools.ocp.mock import MockOcpClient
+    from app.tools.sql.mock import MockSqlExecutor
+
+    assert isinstance(MockOcpClient(), OcpClient)
+    assert isinstance(MockSqlExecutor(), SqlExecutor)
     assert not isinstance(object(), SqlExecutor)

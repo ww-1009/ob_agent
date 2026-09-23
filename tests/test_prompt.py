@@ -14,12 +14,8 @@ def test_system_prompt_no_placeholder():
     assert "TODO" not in p
 
 
-def test_system_prompt_names_all_tools():
-    from app.agent.tools import build_tools
-    from app.tools.ocp.mock import MockOcpClient
-    from app.tools.sql.mock import MockSqlExecutor
-
-    tools = build_tools(MockOcpClient(), MockSqlExecutor())
+def test_system_prompt_names_key_db_tools():
+    # prompt 只在规则里点名关键工具（不再逐条枚举 build_tools 的全部工具名）
     p = system_prompt()
-    for t in tools:
-        assert t.name in p
+    for name in ("execute_sql", "get_table_ddl", "get_tenant_info"):
+        assert name in p

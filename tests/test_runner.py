@@ -16,10 +16,14 @@ from app.tools.ocp.mock import MockOcpClient
 from app.tools.sql.mock import MockSqlExecutor
 from helpers.scripted_model import ScriptedChatModel
 
+# 与 runner.TOOL_STATUS 保持同步：e2e 用例复用同一个工具名与状态文案
+_SLOW_SQL_TOOL = "get_slow_sql"
+_SLOW_SQL_STATUS = "正在从 OCP 拉取慢SQL…"
+
 
 def test_classify_tool_start():
-    ev = {"event": "on_tool_start", "name": "query_slow_sql", "data": {"input": {"top_n": 5}}}
-    assert classify_agent_event(ev) == {"type": "status", "text": "正在从 OCP 拉取慢SQL…"}
+    ev = {"event": "on_tool_start", "name": _SLOW_SQL_TOOL, "data": {"input": {"top_n": 5}}}
+    assert classify_agent_event(ev) == {"type": "status", "text": _SLOW_SQL_STATUS}
 
 
 def test_classify_tool_start_unknown_name_falls_back():
@@ -51,7 +55,7 @@ def test_classify_non_string_content_is_skipped():
 def test_classify_toolcall_construction_is_skipped():
     class Chunk:
         content = ""
-        tool_call_chunks = [{"name": "query_db", "args": "{}", "index": 0}]
+        tool_call_chunks = [{"name": "execute_sql", "args": "{}", "index": 0}]
 
     ev = {"event": "on_chat_model_stream", "data": {"chunk": Chunk()}}
     assert classify_agent_event(ev) is None
