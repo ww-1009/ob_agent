@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import OcpConfig, load_settings
@@ -83,11 +83,6 @@ def _normalize_mode(v) -> str:
     if s == "ORACLE":
         return "oracle"
     raise OcpClientError(f"未知/缺失 OCP 租户 mode: {v!r}")
-
-
-def _iso_utc(dt: datetime) -> str:
-    """datetime → 'YYYY-MM-DDTHH:MM:SSZ'（UTC，无小数秒，结尾 Z）。"""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class RealOcpClient:
@@ -194,8 +189,8 @@ class RealOcpClient:
         :param server_id:查询在指定 OceanBase 服务器上的计划的性能。不指定时，查询 SQL 在所有服务器上的计划的性能。
         :param cluster_id:集群的 ID。
         :param tenant_id:租户的 ID。
-        :param start_time:查看慢 SQL 历史参数的起始时间。该时间只支持 UTC 时间，格式为：YYYY-MM-DDThh:mm:ssZ。
-        :param end_time:查看慢 SQL 历史参数的结束时间。该时间只支持 UTC 时间，格式为：YYYY-MM-DDThh:mm:ssZ。
+        :param start_time:起始时间，形如 2026-02-16T05:32:16+08:00；默认取当前时间往前 30 分钟。
+        :param end_time:结束时间，形如 2026-02-16T05:32:16+08:00；默认取当前时间。
         :return:
         """
         self._require_base_url()
