@@ -203,7 +203,10 @@ def load_settings(
 
     return Settings(
         ocp=OcpConfig(
-            provider=_env_nonempty(env, "OCP_PROVIDER") or ocp_y.get("provider", "real"),
+            # 缺省 mock：无 config.yaml/.env 时「开箱即用」按 README 的离线演示跑通夹具，
+            # 与 OcpConfig.provider 默认值及 sql_ro 保持一致（此前回落 real 会导致
+            # base_url 为空仍走 real，OCP 工具必报配置缺失）。
+            provider=_env_nonempty(env, "OCP_PROVIDER") or ocp_y.get("provider", "mock"),
             base_url=_env_nonempty(env, "OCP_BASE_URL") or ocp_y.get("base_url", ""),
             username=_env_nonempty(env, "OCP_USERNAME") or ocp_y.get("username", ""),
             password=_env_nonempty(env, "OCP_PASSWORD") or ocp_y.get("password", ""),

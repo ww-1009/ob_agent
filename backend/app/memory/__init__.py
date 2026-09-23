@@ -68,16 +68,22 @@ async def _tables_ready(pool: AsyncConnectionPool) -> bool:
 
 async def _open_once(cfg: MemoryConfig, dsn: str) -> tuple[Optional[MemoryRuntime], Optional[str]]:
     """尝试打开一次；失败关闭已建资源并返回原因。"""
-    pool = AsyncConnectionPool(
-        dsn,
-        min_size=cfg.pool_min_size,
-        max_size=cfg.pool_max_size,
-        open=False,
-        # check：取连接时校验并自动重连——PG 重启/空闲被服务端断开后，池里的死连接
-        # 否则会在第一次使用时报错（max_idle/max_lifetime 只保证最终回收）
-        check=AsyncConnectionPool.check_connection,
-        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-    )
+    # AsyncConnectionPool 的构造也会校验参数（min_size > max_size → ValueError）。
+    # 构造必须包在 try 内：异常若穿透 open_memory → lifespan 就违背了本模块
+    # 「打开失败降级为记忆关闭、不阻断服务启动」的契约（见模块 docstring）。
+    try:
+        pool = AsyncConnectionPool(
+            dsn,
+            min_size=cfg.pool_min_size,
+            max_size=cfg.pool_max_size,
+            open=False,
+            # check：取连接时校验并自动重连——PG 重启/空闲被服务端断开后，池里的死连接
+            # 否则会在第一次使用时报错（max_idle/max_lifetime 只保证最终回收）
+            check=AsyncConnectionPool.check_connection,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        )
+    except Exception as e:
+        return None, f"连接池参数错误: {e}"
     try:
         await pool.open(wait=True, timeout=cfg.open_timeout_seconds)
     except Exception as e:
@@ -130,6 +136,12 @@ async def open_memory(cfg: MemoryConfig) -> tuple[Optional[MemoryRuntime], Optio
     except Exception as e:
         logger.warning("记忆初始化失败（配置）：%s", e)
         return None, f"配置错误: {e}"
+
+    # 非法池参数属确定性配置错误，重试无意义：直接降级并给出明确原因。
+    if cfg.pool_min_size > cfg.pool_max_size:
+        msg = f"pool_min_size({cfg.pool_min_size}) 不能大于 pool_max_size({cfg.pool_max_size})"
+        logger.warning("记忆初始化失败（配置）：%s", msg)
+        return None, f"配置错误: {msg}"
 
     last_error: Optional[str] = None
     attempts = max(1, cfg.open_attempts)

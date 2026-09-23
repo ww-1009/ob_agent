@@ -116,25 +116,28 @@ async def stream_chat(
     async def _produce() -> None:
         # 确认中间件在 producer 内构建：owner = 本 producer task，
         # 其 finally 统一 fail_all——流正常结束/断开/异常都不留挂起确认。
-        confirm_mw = build_confirm_middleware(
-            emit=q.put_nowait,
-            broker=broker if confirm_enabled else None,
-            owner=asyncio.current_task(),
-            timeout_seconds=confirm_timeout_seconds,
-        )
-        agent: Runnable = create_agent(
-            model=model,
-            tools=tools,
-            system_prompt=system_prompt(now=datetime.now()),
-            middleware=[confirm_mw, summarization],
-            checkpointer=checkpointer,
-        )
-        # 有检查点且给了 thread_id：messages 只含本轮新消息，历史由 langgraph
-        # 从该 thread 的状态加载（messages 通道是 add_messages 追加语义）。
-        run_config: dict = {"recursion_limit": recursion_limit}
-        if checkpointer is not None and thread_id:
-            run_config["configurable"] = {"thread_id": thread_id}
+        # 注意：构建 create_agent / 中间件也可能抛异常，必须一并放进 try：
+        # 否则异常既不投事件也不 fail_all，消费端永久阻塞在 q.get()，
+        # max_seconds 完全失效，且线程锁被占导致该 thread 永久 409。
         try:
+            confirm_mw = build_confirm_middleware(
+                emit=q.put_nowait,
+                broker=broker if confirm_enabled else None,
+                owner=asyncio.current_task(),
+                timeout_seconds=confirm_timeout_seconds,
+            )
+            agent: Runnable = create_agent(
+                model=model,
+                tools=tools,
+                system_prompt=system_prompt(now=datetime.now()),
+                middleware=[confirm_mw, summarization],
+                checkpointer=checkpointer,
+            )
+            # 有检查点且给了 thread_id：messages 只含本轮新消息，历史由 langgraph
+            # 从该 thread 的状态加载（messages 通道是 add_messages 追加语义）。
+            run_config: dict = {"recursion_limit": recursion_limit}
+            if checkpointer is not None and thread_id:
+                run_config["configurable"] = {"thread_id": thread_id}
             async with asyncio.timeout(max_seconds):
                 # run_id → 起始信息，用于把 on_tool_start / on_tool_end 配对成一条轨迹
                 pending: dict[str, dict] = {}
