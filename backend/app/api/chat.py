@@ -10,7 +10,6 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import BaseModel, Field
 
-from app.agent.confirm import ConfirmationBroker
 from app.agent.runner import stream_chat
 from app.api.deps import checked_thread_id
 from app.sse import sse_frame
@@ -41,22 +40,37 @@ def _to_langchain(messages: List[ChatMessage]) -> List[BaseMessage]:
     ]
 
 
+# 进程内保留的 thread 锁数量上限。锁与 thread_id 一一对应且不随会话删除清理，
+# 无上限时映射会随不同 thread_id 数量无界增长。
+_MAX_TRACKED_THREAD_LOCKS = 1024
+
+
 def _thread_lock(state, thread_id: str) -> asyncio.Lock:
     """按会话取互斥锁。
 
     同一 thread 并发两轮会让 langgraph 写出分叉的检查点（上下文互相覆盖），
     因此显式串行化：占用中直接 409，而不是静默排队或写坏状态。
-    锁对象按 thread_id 保留到进程结束（数量受会话数上限约束，不做驱逐，
-    以免"释放后驱逐 + 第三方新建"导致同一 thread 出现两把锁）。
+
+    锁对象在进程内按 thread_id 复用，并在超过 _MAX_TRACKED_THREAD_LOCKS 时驱逐
+    **未被占用**的旧锁：持有中的锁绝不驱逐，而 asyncio.Lock.acquire() 对空闲锁不挂起、
+    调用方取锁与检查之间没有 await，因此驱逐不会让同一 thread 同时出现两把活锁。
     """
     locks = getattr(state, "thread_locks", None)
     if locks is None:
         locks = {}
         state.thread_locks = locks
     lock = locks.get(thread_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        locks[thread_id] = lock
+    if lock is not None:
+        return lock
+    if len(locks) >= _MAX_TRACKED_THREAD_LOCKS:
+        # 先驱逐旧锁再插入新锁：新锁绝不在本轮被回收
+        for tid in list(locks):
+            if len(locks) < _MAX_TRACKED_THREAD_LOCKS:
+                break
+            if not locks[tid].locked():
+                del locks[tid]
+    lock = asyncio.Lock()
+    locks[thread_id] = lock
     return lock
 
 
@@ -67,6 +81,14 @@ async def chat(req: ChatRequest, request: Request):
         raise HTTPException(
             status_code=503,
             detail="LLM 未配置：请在 config.yaml / .env 填写 llm.base_url、api_key、model",
+        )
+
+    # HITL fail closed：开了人工确认却没有确认通道时，宁可报 503 也不能无审批执行受控工具
+    broker = getattr(state, "confirm_broker", None)
+    if state.settings.agent.confirm_db_ops and broker is None:
+        raise HTTPException(
+            status_code=503,
+            detail="确认通道不可用：启用人工审批时无法开始对话",
         )
 
     memory = getattr(state, "memory", None)
@@ -109,10 +131,9 @@ async def chat(req: ChatRequest, request: Request):
             thread_lock.release()
 
     async def gen() -> AsyncIterator[str]:
-        # 每次请求独立 broker：owner 注册为 producer task（stream_chat 内部），
-        # 其 finally 负责 fail_all——客户端断连/流结束都不会留下挂起的确认。
-        broker = ConfirmationBroker()
-        state.active_broker = broker
+        # 进程级共享 broker：request_id 全局唯一，寻址不依赖"最近一次请求"这类可变槽位；
+        # 跨会话隔离靠 owner（stream_chat 把 owner 注册为自身的 producer task），
+        # 其 finally 的 fail_all(owner) 保证客户端断连/流结束都不会留下挂起的确认。
         parts: list[str] = []
         persist = memory is not None
 
@@ -179,8 +200,6 @@ async def chat(req: ChatRequest, request: Request):
                     await persist_answer()
                 yield sse_frame(ev)
         finally:
-            if getattr(state, "active_broker", None) is broker:
-                state.active_broker = None
             # 错误/客户端中断路径：把已收到的部分回答落库（空则跳过）
             await persist_answer()
             release_lock()

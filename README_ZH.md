@@ -352,11 +352,11 @@ pip install -r requirements.txt      # 依赖以 requirements.txt 为唯一来�
 
 ```bash
 cd /path/to/ob_agent/backend
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 - `--host 127.0.0.1`：后端只监听本机，由外部反向代理（Nginx）对外提供 443/80。
-- `--workers`：按机器核数与并发调整；如需更高吞吐可换 gunicorn + uvicorn worker。
+- `--workers`：**必须保持 1。** 人工确认（HITL）通道（前端只带 `request_id` POST 到 `/api/chat/confirm`）与同一 thread 的串行锁都是**进程内**状态：多 worker 时审批可能落到从未持有该待确认请求的进程（404/503），且两个 worker 可能同时跑同一 thread 并写同一个 Postgres 检查点。需要横向扩展时，必须在网关按 `thread_id` 做粘性路由并自行保证同一 thread 单写——当前版本不提供该能力。
 - 全程保持 `cd backend` 以确保 `./ob_wiki`、`./config.yaml` 相对路径正确。
 
 ### 第 2 步：前端构建与静态资源托管
@@ -438,7 +438,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/ob_agent/backend        # 必须为 backend，相对路径依赖它
-ExecStart=/opt/ob_agent/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+ExecStart=/opt/ob_agent/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=3
 User=www-data                                 # 按实际运行用户调整

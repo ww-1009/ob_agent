@@ -340,11 +340,11 @@ In production, it is recommended to **disable reload** and run continuously.
 
 ```bash
 cd /path/to/ob_agent/backend
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 - `--host 127.0.0.1`: The backend listens locally only; external reverse proxy (Nginx) exposes ports 443/80 externally.
-- `--workers`: Adjust based on CPU cores and concurrency; for higher throughput, consider using gunicorn + uvicorn worker.
+- `--workers`: **Keep this at 1.** The HITL confirmation channel (the frontend posts a decision to `/api/chat/confirm` with only a `request_id`) and the per-thread serialization lock are both **in-process** state. With more than one worker, an approval can land on a worker that never held the pending request (404/503), and two workers can run the same thread concurrently against the shared Postgres checkpointer. Horizontal scaling therefore requires sticky routing by `thread_id` at the gateway plus single-writer guarantees per thread — not provided by this version.
 - Maintain `cd backend` throughout to ensure relative paths `./ob_wiki` and `./config.yaml` remain valid.
 
 ### Step 2: Frontend Build and Static Asset Hosting
@@ -424,7 +424,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/ob_agent/backend        # Must be backend; relative paths rely on it
-ExecStart=/opt/ob_agent/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+ExecStart=/opt/ob_agent/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=3
 User=www-data                                 # Adjust based on actual execution user
