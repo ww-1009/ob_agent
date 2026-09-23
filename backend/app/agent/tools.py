@@ -17,8 +17,8 @@ from app.config import SqlConfig, load_settings
 from app.tools.base import OcpClient, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import assert_read_only
 from app.tools.sql.mock import MockSqlExecutor
-from app.tools.sql.oracle import OBOracleSqlExecutor, resolve_config
-from app.tools.sql.real import RealSqlExecutor
+from app.tools.sql.oracle import OracleSqlExecutor, resolve_config as resolve_oracle_config
+from app.tools.sql.real import MysqlSqlExecutor, resolve_config as resolve_mysql_config
 
 
 def _ok(**payload: object) -> str:
@@ -74,11 +74,13 @@ def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant
             service_name=sql_config.service_name,
         )
         # Oracle 模式：租户走 service_name，用户名补成 user@tenant
-        return OBOracleSqlExecutor(resolve_config(oracle_cfg, tenant_name))
+        return OracleSqlExecutor(resolve_oracle_config(oracle_cfg, tenant_name))
 
-    return RealSqlExecutor(SqlConfig(
-        **common,
-        username=f'{sql_config.username}@{tenant_name}#{cluster_name}',
+    # MySQL 模式：租户与集群写在用户名里 user@tenant#cluster
+    return MysqlSqlExecutor(resolve_mysql_config(
+        SqlConfig(**common, username=sql_config.username),
+        tenant_name,
+        cluster_name,
     ))
 
 def build_tools(
@@ -98,7 +100,7 @@ def build_tools(
     ).get_tools()
 
     # 真实执行器按 (租户, 集群, 库, 租户类型) 缓存：复用底层长连接，
-    # 避免每次工具调用都重新建连与鉴权（见 RealSqlExecutor 的连接复用说明）。
+    # 避免每次工具调用都重新建连与鉴权（见 PooledSqlExecutor 的连接复用说明）。
     executor_cache: dict[tuple[str, str, str, str], SqlExecutor] = {}
 
     def _db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str):

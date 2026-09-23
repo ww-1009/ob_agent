@@ -75,7 +75,7 @@ ob_agent/
 │   │   └── tools/            # 双适配器实现
 │   │       ├── base.py       # 数据模型 / 异常 / 协议接口
 │   │       ├── ocp/          # OCP 客户端：mock.py（fixtures）/ real.py（httpx）
-│   │       └── sql/          # SQL 执行器：guard.py（只读防线）/ mock / real
+│   │       └── sql/          # SQL 执行器：guard.py（只读防线）/ base（公共骨架）/ mock · real（MySQL）· oracle
 │   ├── run.sh                # 启动入口（首次运行会据 requirements.txt 创建 .venv）
 │   ├── requirements.txt
 │   ├── config.example.yaml   # 示例配置（入库）

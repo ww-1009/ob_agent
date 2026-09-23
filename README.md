@@ -74,7 +74,7 @@ ob_agent/
 │   │   └── tools/            # Dual-adapter implementation
 │   │       ├── base.py       # Data models / Exceptions / Protocol interfaces
 │   │       ├── ocp/          # OCP client: mock.py (fixtures) / real.py (httpx)
-│   │       └── sql/          # SQL executor: guard.py (Read-only defense) / mock / real
+│   │       └── sql/          # SQL executors: guard.py (read-only) / base (shared pool) / mock · real (MySQL) · oracle
 │   ├── run.sh                # Startup entrypoint (creates .venv from requirements.txt on first run)
 │   ├── requirements.txt
 │   ├── config.example.yaml   # Example config (Tracked in Git)
