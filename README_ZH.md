@@ -196,7 +196,7 @@ cp backend/.env.example backend/.env
 | `sql_ro`  | `host_map`                                               | real 时：集群名 → 连接串的映射（dict 字符串）                   |
 | `sql_ro`  | `username`/`password`                                    | 只读数据库账号（建议仅授 SELECT）                            |
 | `sql_ro`  | `connect_timeout` / `query_timeout_seconds` / `max_rows` | 连接/查询超时与结果行数上限                                  |
-| `sql_ro`  | `driver` / `service_name`                                | **仅 Oracle 模式租户**（MySQL 忽略）：OCI 驱动（`oracledb` \| `cx_oracle`）与 ODP service name（留空＝租户名） |
+| `sql_ro`  | `driver`                                                 | **仅 Oracle 模式租户**（MySQL 忽略）：OCI 驱动（`oracledb` \| `cx_oracle`）。DSN 的 service name 不可配置，直接取工具传入的 `db_name` |
 | `llm`     | `base_url`/`api_key`/`model`                             | OpenAI 兼容模型接口（三者齐全才算“已配置”）                      |
 | `llm`     | `temperature` / `max_input_tokens`                       | 采样温度 / 上下文压缩阈值基准                                |
 | `agent`   | `send_row_data`                                          | 送入 LLM 的结果是否含行数据                                |
@@ -486,4 +486,4 @@ curl -N -X POST https://your-domain.example.com/api/chat \
 - **real SQL**：EXPLAIN 计划语义、大结果集游标（SSCursor）、`ob_query_timeout` 与只读账号授权范围。
 - **SSE**：客户端断开时确认服务端真中止（无孤儿 task）。
 - **LLM**：配置完成后，mock/演示提示（system prompt 规则 6）改为按 provider 注入。
-- **Oracle 租户**：已实现 —— `execute_sql` / `get_table_ddl` 现已把 Oracle 模式租户路由到 OCI 驱动（`backend/app/tools/sql/oracle.py`）。待联调确认：各租户的 ODP `service_name`、以及是否开放 `DBMS_METADATA.GET_DDL`（代码会回退到 `USER_TAB_COLUMNS`）。注意 `cx_Oracle` 无 Python ≥ 3.11 轮子，故 `driver` 默认 `oracledb`（瘦模式，无需 Oracle 客户端库）。
+- **Oracle 租户**：已实现 —— `execute_sql` / `get_table_ddl` 现已把 Oracle 模式租户路由到 OCI 驱动（`backend/app/tools/sql/oracle.py`）。DSN 的 service name 直接取工具的 `db_name` 参数（即该租户的 SERVICE_NAME），不再从配置读取。待联调确认：该租户的 SERVICE_NAME 是否与你传入的 `db_name` 一致（不一致会报 ORA-12514/12505）、以及是否开放 `DBMS_METADATA.GET_DDL`（代码会回退到 `USER_TAB_COLUMNS`）。注意 `cx_Oracle` 无 Python ≥ 3.11 轮子，故 `driver` 默认 `oracledb`（瘦模式，无需 Oracle 客户端库）。

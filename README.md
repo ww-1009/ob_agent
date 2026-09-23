@@ -189,7 +189,7 @@ cp backend/.env.example backend/.env
 | `sql_ro`  | `host_map`                                               | When real: Cluster name → Connection string mapping (dict string) |
 | `sql_ro`  | `username`/`password`                                    | Read-only database account (SELECT privilege only recommended) |
 | `sql_ro`  | `connect_timeout` / `query_timeout_seconds` / `max_rows` | Connection/query timeout and max row limits      |
-| `sql_ro`  | `driver` / `service_name`                                | **Oracle-mode tenants only** (ignored for MySQL): OCI driver (`oracledb` \| `cx_oracle`) and the ODP service name (empty = tenant name) |
+| `sql_ro`  | `driver`                                                 | **Oracle-mode tenants only** (ignored for MySQL): OCI driver (`oracledb` \| `cx_oracle`). The DSN service name is not configurable — it is taken from the `db_name` passed by the tool |
 | `llm`     | `base_url`/`api_key`/`model`                             | OpenAI-compatible model API (All three required to be considered "configured") |
 | `llm`     | `temperature` / `max_input_tokens`                       | Sampling temperature / Context compression threshold benchmark |
 | `agent`   | `send_row_data`                                          | Whether results passed to LLM contain row data  |
@@ -469,4 +469,4 @@ Open the site in a browser, and you should see the empty state page "Hello, I am
 - **real SQL**: EXPLAIN plan semantics, large result set cursor (SSCursor), `ob_query_timeout`, and read-only account permission scope.
 - **SSE**: Verify server truly aborts task when client disconnects (no orphan tasks).
 - **LLM**: After configuration, change mock/demo prompt (system prompt rule 6) to inject per provider.
-- **Oracle Tenant**: Implemented — `execute_sql` / `get_table_ddl` now route Oracle-mode tenants to the OCI driver (`backend/app/tools/sql/oracle.py`). Remaining live-test items: confirm the ODP `service_name` for your tenants, and whether `DBMS_METADATA.GET_DDL` is available (the code falls back to `USER_TAB_COLUMNS`). Note `cx_Oracle` has no wheel for Python ≥ 3.11, so the default `driver` is `oracledb` (thin mode, no Oracle client libraries needed).
+- **Oracle Tenant**: Implemented — `execute_sql` / `get_table_ddl` now route Oracle-mode tenants to the OCI driver (`backend/app/tools/sql/oracle.py`). The DSN service name comes from the `db_name` argument of the tool (the tenant's SERVICE_NAME), not from configuration. Remaining live-test item: whether the tenant's SERVICE_NAME equals the `db_name` you pass (a mismatch surfaces as ORA-12514/12505), and whether `DBMS_METADATA.GET_DDL` is available (the code falls back to `USER_TAB_COLUMNS`). Note `cx_Oracle` has no wheel for Python ≥ 3.11, so the default `driver` is `oracledb` (thin mode, no Oracle client libraries needed).
