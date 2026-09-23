@@ -4,6 +4,11 @@ import pytest
 
 from app.config import load_settings
 
+# 「没有配置文件」的默认值用例必须显式指向一个不存在的路径：
+# load_settings(config_path=None) 会回退到 backend/config.yaml，而开发机/部署机上
+# 这个文件通常是存在的（里面有真实 OCP/SQL/LLM 配置），传 None 会让断言随环境漂移。
+_MISSING_CONFIG = "/nonexistent-ob-agent-test-config.yaml"
+
 
 def _write_yaml(tmp_path: Path, text: str) -> str:
     p = tmp_path / "config.yaml"
@@ -12,7 +17,7 @@ def _write_yaml(tmp_path: Path, text: str) -> str:
 
 
 def test_defaults_are_mock_when_no_file(tmp_path):
-    s = load_settings(config_path=None, env={"OCP_PROVIDER": "mock"})
+    s = load_settings(config_path=_MISSING_CONFIG, env={"OCP_PROVIDER": "mock"})
     assert s.ocp.provider == "mock"
     assert s.sql_ro.provider == "mock"
     assert s.llm.base_url == ""
@@ -90,8 +95,6 @@ def test_llm_is_configured_strips_whitespace():
 
 
 # ---- 审批超时必须严格短于整轮上限（否则审批超时永远不会先触发）----------------
-
-_MISSING_CONFIG = "/nonexistent-ob-agent-test-config.yaml"
 
 
 def test_default_confirm_timeout_is_strictly_below_max_seconds():
