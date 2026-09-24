@@ -49,7 +49,38 @@ body {
 }
 code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
-.app { display: flex; flex-direction: column; height: 100vh; }
+/* 外壳：左侧历史会话栏 + 右侧聊天列（未启用记忆时只有右列） */
+.app-shell { display: flex; height: 100vh; }
+.app { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; height: 100vh; }
+
+/* 历史会话侧栏 */
+.sidebar {
+  flex: 0 0 250px; display: flex; flex-direction: column;
+  background: var(--panel); border-right: 1px solid var(--line); overflow: hidden;
+}
+.sidebar-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.sidebar-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.sidebar-hint { margin: 0; padding: 12px; font-size: 13px; color: var(--text-2); }
+.sidebar-list { flex: 1 1 auto; list-style: none; margin: 0; padding: 6px; overflow-y: auto; }
+.sidebar-item { display: flex; align-items: center; gap: 4px; border-radius: 8px; }
+.sidebar-item:hover { background: var(--panel-2); }
+.sidebar-item.active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.sidebar-open {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 8px; border: 0; border-radius: 8px; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.sidebar-item-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-item-meta { font-size: 11px; color: var(--text-2); }
+.sidebar-delete {
+  flex: 0 0 auto; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-2); font-size: 16px; line-height: 1; cursor: pointer;
+}
+.sidebar-delete:hover { color: var(--err); background: var(--panel-2); }
+@media (max-width: 720px) { .sidebar { flex-basis: 180px; } }
 
 /* 顶栏 */
 .topbar {
@@ -179,3 +210,87 @@ code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, m
   border-radius: 999px; padding: 3px 10px; white-space: nowrap;
 }
 .health-badge.offline { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, transparent); }
+
+/* 工具轨迹：折叠列表，展示「调用了什么、耗时、行数、成功/失败/被拒绝」 */
+.trace {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--code-bg); overflow: hidden;
+}
+.trace-title { font-size: 12px; color: var(--text-2); padding: 6px 10px; border-bottom: 1px solid var(--code-line); }
+.trace-row + .trace-row { border-top: 1px solid var(--code-line); }
+.trace-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px;
+  border: 0; background: transparent; color: inherit; font: inherit; font-size: 12px;
+  text-align: left; cursor: pointer;
+}
+.trace-head:hover { background: var(--panel-2); }
+.trace-caret { flex: 0 0 auto; color: var(--text-2); }
+.trace-name { flex: 0 1 auto; font-weight: 600; }
+.trace-meta { flex: 1 1 auto; color: var(--text-2); }
+.trace-state { flex: 0 0 auto; }
+.trace-row.ok .trace-state { color: var(--accent); }
+.trace-row.failed .trace-state { color: var(--err); }
+.trace-row.denied .trace-state { color: #b7791f; }
+.trace-body { padding: 0 10px 8px 26px; }
+.trace-error { font-size: 12px; color: var(--err); margin-bottom: 4px; }
+.trace-args {
+  margin: 0; padding: 8px; font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  background: var(--panel); border: 1px solid var(--code-line); border-radius: 8px; max-height: 220px; overflow: auto;
+}
+
+/* 执行计划视图（get_sql_explain 轨迹内）：按 depth 缩进的算子树 + 算子汇总表 */
+.plan {
+  margin: 0 0 8px; padding: 8px; font-size: 12px;
+  background: var(--panel); border: 1px solid var(--code-line); border-radius: 8px;
+}
+.plan-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.plan-title { font-weight: 600; }
+.plan-uid { color: var(--text-2); }
+.plan-sub { color: var(--text-2); }
+.plan-warn { color: #b7791f; }
+.plan-tree { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }
+.plan-node + .plan-node { border-top: 1px dashed var(--code-line); }
+.plan-line { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.plan-op { font-weight: 600; white-space: nowrap; }
+.plan-node.hottest .plan-op { color: var(--err); }
+.plan-name { color: var(--text-2); }
+.plan-nums { margin-left: auto; color: var(--text-2); white-space: nowrap; }
+.plan-pct { color: var(--text-2); }
+.plan-prop { color: var(--text-2); word-break: break-word; opacity: 0.85; }
+.plan-summary { width: 100%; margin-top: 8px; border-collapse: collapse; }
+.plan-summary th, .plan-summary td {
+  padding: 3px 6px; border-bottom: 1px solid var(--code-line); text-align: right;
+}
+.plan-summary th:first-child, .plan-summary td:first-child { text-align: left; }
+.plan-summary th { color: var(--text-2); font-weight: 600; }
+.plan-summary tr:last-child td { border-bottom: 0; }
+
+/* 工具审计面板（右侧抽屉） */
+.audit-panel {
+  flex: 0 0 380px; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--line); overflow: hidden;
+}
+.audit-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.audit-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.audit-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.audit-hint { margin: 0; padding: 12px; font-size: 13px; color: var(--text-2); }
+.audit-list { flex: 1 1 auto; list-style: none; margin: 0; padding: 8px; overflow-y: auto; }
+.audit-item { padding: 8px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+.audit-item.denied { border-color: color-mix(in srgb, #b7791f 45%, transparent); }
+.audit-item.failed { border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.audit-line { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.audit-state { flex: 0 0 auto; font-weight: 600; }
+.audit-item.ok .audit-state { color: var(--accent); }
+.audit-item.failed .audit-state { color: var(--err); }
+.audit-item.denied .audit-state { color: #b7791f; }
+.audit-tool { flex: 0 1 auto; font-weight: 600; }
+.audit-meta { flex: 1 1 auto; color: var(--text-2); text-align: right; }
+.audit-error { font-size: 12px; color: var(--err); margin-top: 4px; }
+.audit-args {
+  margin: 6px 0 0; padding: 6px 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word;
+  background: var(--code-bg); border: 1px solid var(--code-line); border-radius: 6px; max-height: 160px; overflow: auto;
+}
+@media (max-width: 900px) { .audit-panel { flex-basis: 260px; } }

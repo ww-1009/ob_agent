@@ -23,6 +23,7 @@ llm_db/
 # IDE
 .idea/
 .vscode/
+.jbeval/
 
 ob_wiki/
 

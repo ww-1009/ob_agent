@@ -4,6 +4,11 @@ import pytest
 
 from app.config import load_settings
 
+# 「没有配置文件」的默认值用例必须显式指向一个不存在的路径：
+# load_settings(config_path=None) 会回退到 backend/config.yaml，而开发机/部署机上
+# 这个文件通常是存在的（里面有真实 OCP/SQL/LLM 配置），传 None 会让断言随环境漂移。
+_MISSING_CONFIG = "/nonexistent-ob-agent-test-config.yaml"
+
 
 def _write_yaml(tmp_path: Path, text: str) -> str:
     p = tmp_path / "config.yaml"
@@ -12,9 +17,9 @@ def _write_yaml(tmp_path: Path, text: str) -> str:
 
 
 def test_defaults_are_mock_when_no_file(tmp_path):
-    s = load_settings(config_path=None, env={"OCP_PROVIDER": "mock"})
+    s = load_settings(config_path=_MISSING_CONFIG, env={"OCP_PROVIDER": "mock"})
     assert s.ocp.provider == "mock"
-    assert s.sql.provider == "mock"
+    assert s.sql_ro.provider == "mock"
     assert s.llm.base_url == ""
     assert s.agent.send_row_data is True
     assert s.agent.max_seconds == 120
@@ -23,11 +28,11 @@ def test_defaults_are_mock_when_no_file(tmp_path):
 def test_yaml_is_loaded(tmp_path):
     path = _write_yaml(
         tmp_path,
-        "sql:\n  provider: real\n  max_rows: 50\nagent:\n  send_row_data: false\n",
+        "sql_ro:\n  provider: real\n  max_rows: 50\nagent:\n  send_row_data: false\n",
     )
     s = load_settings(config_path=path, env={})
-    assert s.sql.provider == "real"
-    assert s.sql.max_rows == 50
+    assert s.sql_ro.provider == "real"
+    assert s.sql_ro.max_rows == 50
     assert s.agent.send_row_data is False
 
 
@@ -87,3 +92,35 @@ def test_llm_is_configured_strips_whitespace():
     assert LLMConfig(base_url="x", api_key="k", model="m").is_configured is True
     assert LLMConfig(base_url="  ", api_key="k", model="m").is_configured is False
     assert LLMConfig().is_configured is False
+
+
+# ---- 审批超时必须严格短于整轮上限（否则审批超时永远不会先触发）----------------
+
+
+def test_default_confirm_timeout_is_strictly_below_max_seconds():
+    s = load_settings(config_path=_MISSING_CONFIG, env={"OCP_PROVIDER": "mock"})
+    assert 0 < s.agent.confirm_timeout_seconds < s.agent.max_seconds
+
+
+def test_confirm_timeout_not_less_than_max_seconds_raises(tmp_path):
+    path = _write_yaml(
+        tmp_path,
+        "agent:\n  confirm_db_ops: true\n  max_seconds: 60\n  confirm_timeout_seconds: 60\n",
+    )
+    with pytest.raises(ValueError):
+        load_settings(config_path=path, env={})
+
+
+def test_confirm_timeout_equal_to_max_is_allowed_when_hitl_disabled(tmp_path):
+    path = _write_yaml(
+        tmp_path,
+        "agent:\n  confirm_db_ops: false\n  max_seconds: 60\n  confirm_timeout_seconds: 60\n",
+    )
+    s = load_settings(config_path=path, env={})
+    assert s.agent.confirm_timeout_seconds == 60
+
+
+def test_confirm_timeout_must_be_positive(tmp_path):
+    path = _write_yaml(tmp_path, "agent:\n  confirm_timeout_seconds: 0\n")
+    with pytest.raises(ValueError):
+        load_settings(config_path=path, env={})

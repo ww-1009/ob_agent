@@ -1,16 +1,49 @@
 <script setup>
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import HealthBadge from './components/HealthBadge.vue'
 import QuickChips from './components/QuickChips.vue'
 import MessageBubble from './components/MessageBubble.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import ThreadSidebar from './components/ThreadSidebar.vue'
+import AuditPanel from './components/AuditPanel.vue'
 import { useChat } from './composables/useChat.js'
 
-const { messages, busy, canSend, llmNotConfigured, pendingConfirm, send, stop, clear, decideConfirm } = useChat()
+const {
+  messages, busy, canSend, llmNotConfigured, pendingConfirm, send, stop, clear, decideConfirm,
+  memoryEnabled, threads, loadingThread, threadId, init, openThread, newThread, removeThread,
+  auditEvents, loadingAudit, refreshAudit,
+} = useChat()
 const draft = ref('')
 const scrollEl = ref(null)
 const atBottom = ref(true)
 const MAX_INPUT = 2000
+// 工具审计面板：scope 为 'current'（仅本会话）或 'all'（全部会话）
+const auditOpen = ref(false)
+const auditScope = ref('current')
+
+// refreshAudit(undefined) = 当前会话；( '') = 全部会话
+function auditFilter() {
+  return auditScope.value === 'current' ? undefined : ''
+}
+
+async function toggleAudit() {
+  auditOpen.value = !auditOpen.value
+  if (auditOpen.value) await refreshAudit(auditFilter())
+}
+
+async function refreshAuditNow() {
+  await refreshAudit(auditFilter())
+}
+
+async function toggleAuditScope() {
+  auditScope.value = auditScope.value === 'current' ? 'all' : 'current'
+  await refreshAuditNow()
+}
+
+// 启动即对齐服务端能力：记忆开启时恢复上次会话与历史列表
+onMounted(() => {
+  void init()
+})
 
 async function submit() {
   if (busy.value) return // busy 时（回答中）不允许 Enter 新发送；按钮此时已是「停止」
@@ -28,6 +61,12 @@ async function submit() {
 function onPick(text) {
   draft.value = text
   void submit()
+}
+
+async function onSelectThread(id) {
+  if (busy.value) stop() // 切换会话即中止在途回答（后端会把已收到的部分落库）
+  atBottom.value = true
+  await openThread(id)
 }
 
 function onScroll() {
@@ -68,49 +107,78 @@ watch(
 </script>
 
 <template>
-  <div class="app">
-    <header class="topbar">
-      <h1 class="title">OceanBase DB Agent</h1>
-      <div class="topbar-right">
-        <button v-if="messages.length" type="button" class="btn-ghost" @click="clear">新对话</button>
-        <HealthBadge />
-      </div>
-    </header>
+  <div class="app-shell">
+    <ThreadSidebar
+      v-if="memoryEnabled"
+      :threads="threads"
+      :active-id="threadId"
+      :loading="loadingThread"
+      @select="onSelectThread"
+      @create="newThread"
+      @remove="removeThread"
+    />
 
-    <div v-if="llmNotConfigured" class="notice warn">
-      LLM 未配置：请在 <code>backend/config.yaml</code> 填写 <code>llm.base_url / api_key / model</code> 后重启后端。
+    <div class="app">
+      <header class="topbar">
+        <h1 class="title">OceanBase DB Agent</h1>
+        <div class="topbar-right">
+          <button v-if="memoryEnabled" type="button" class="btn-ghost" @click="toggleAudit">
+            {{ auditOpen ? '隐藏审计' : '工具审计' }}
+          </button>
+          <!-- 侧栏已提供「新对话」入口，无侧栏（未启用记忆）时保留顶栏按钮 -->
+          <button v-if="messages.length && !memoryEnabled" type="button" class="btn-ghost" @click="clear">新对话</button>
+          <HealthBadge />
+        </div>
+      </header>
+
+      <div v-if="llmNotConfigured" class="notice warn">
+        LLM 未配置：请在 <code>backend/config.yaml</code> 填写 <code>llm.base_url / api_key / model</code> 后重启后端。
+      </div>
+
+      <main ref="scrollEl" class="thread" @scroll="onScroll">
+        <section v-if="loadingThread && !messages.length" class="empty">
+          <p class="empty-tip">正在加载历史会话…</p>
+        </section>
+        <section v-else-if="!messages.length" class="empty">
+          <p class="empty-hello">你好，我是 OceanBase DBA 助手。</p>
+          <p class="empty-tip">
+            排查慢SQL、分析执行计划、优化查询性能。交互内容会发送到所配置的 LLM API。
+          </p>
+          <QuickChips @pick="onPick" />
+        </section>
+        <section v-else class="list">
+          <MessageBubble v-for="m in messages" :key="m.id" :message="m" />
+        </section>
+      </main>
+
+      <footer class="composer">
+        <textarea
+          v-model="draft"
+          class="input"
+          rows="1"
+          :maxlength="MAX_INPUT"
+          placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+          @input="autosize"
+          @keydown.enter.exact="onEnter"
+        ></textarea>
+        <div class="composer-actions">
+          <span class="counter">{{ draft.length }}/{{ MAX_INPUT }}</span>
+          <button v-if="busy" type="button" class="btn primary" @click="stop">停止</button>
+          <button v-else type="button" class="btn primary" :disabled="!canSend || !draft.trim()" @click="submit">发送</button>
+        </div>
+      </footer>
+
+      <ConfirmDialog :confirm="pendingConfirm" @decide="decideConfirm" />
     </div>
 
-    <main ref="scrollEl" class="thread" @scroll="onScroll">
-      <section v-if="!messages.length" class="empty">
-        <p class="empty-hello">你好，我是 OceanBase DBA 助手。</p>
-        <p class="empty-tip">
-          排查慢SQL、分析执行计划、优化查询性能。当前为 <b>mock 演示</b> 数据；交互内容会发送到所配置的 LLM API。
-        </p>
-        <QuickChips @pick="onPick" />
-      </section>
-      <section v-else class="list">
-        <MessageBubble v-for="m in messages" :key="m.id" :message="m" />
-      </section>
-    </main>
-
-    <footer class="composer">
-      <textarea
-        v-model="draft"
-        class="input"
-        rows="1"
-        :maxlength="MAX_INPUT"
-        placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-        @input="autosize"
-        @keydown.enter.exact="onEnter"
-      ></textarea>
-      <div class="composer-actions">
-        <span class="counter">{{ draft.length }}/{{ MAX_INPUT }}</span>
-        <button v-if="busy" type="button" class="btn primary" @click="stop">停止</button>
-        <button v-else type="button" class="btn primary" :disabled="!canSend || !draft.trim()" @click="submit">发送</button>
-      </div>
-    </footer>
-
-    <ConfirmDialog :confirm="pendingConfirm" @decide="decideConfirm" />
+    <AuditPanel
+      v-if="auditOpen && memoryEnabled"
+      :events="auditEvents"
+      :loading="loadingAudit"
+      :scope="auditScope"
+      @close="auditOpen = false"
+      @refresh="refreshAuditNow"
+      @toggle-scope="toggleAuditScope"
+    />
   </div>
 </template>

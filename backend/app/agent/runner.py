@@ -1,41 +1,48 @@
 """Agent 编排：把 langchain agent 的 astream_events 翻译成对外事件流。
 
-对外事件（dict）：{type: "status"|"delta"|"error"|"done", ...}
+对外事件（dict）：{type: "status"|"delta"|"tool"|"error"|"done", ...}
 
 - stream_chat 对历史消息运行 create_agent 驱动的 agent，逐个 yield 用户事件。
 - classify_agent_event 是纯函数：单条 v2 原始事件 → 用户事件 / None。
+- 工具轨迹（type="tool"）在 _produce 内按 run_id 配对 on_tool_start/on_tool_end 产出，
+  携带入参摘要、耗时、成败、行数；行数据本身永不进入事件。
+- get_sql_explain 额外带归一化后的执行计划视图（算子/代价，仍不含行数据），供前端画计划树。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from datetime import datetime
 from typing import AsyncIterator, Dict, List, Mapping
 
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
-from app.agent.confirm import build_confirm_middleware
+from app.agent.confirm import CONFIRM_TOOL_LABELS, build_confirm_middleware
+from app.agent.plan_view import extract_plan_view
 from app.agent.prompt import system_prompt
+from app.agent.tool_trace import extract_tool_result, tool_trace_event
 
 logger = logging.getLogger(__name__)
 
-# 工具 → 人性化 status 文案（on_tool_start 用）
+# 工具 → 人性化 status 文案（on_tool_start 用）；须与 build_tools 实际注册的工具名保持一致
 TOOL_STATUS: Dict[str, str] = {
-    "get_topology": "正在获取集群/租户信息…",
+    "get_tenant_info": "正在从 OCP 拉取租户信息…",
     "get_slow_sql": "正在从 OCP 拉取慢SQL…",
     "get_full_sql_text": "正在从 OCP 拉取完整SQL文本…",
     "get_sql_explain": "正在从 OCP 拉取执行计划…",
     "get_sql_top_plan": "正在从 OCP 拉取SQL计划uid…",
-    "get_tenants_list": "正在从 OCP 拉取租户列表…",
-    "get_tenant_info": "正在从 OCP 拉取租户信息…",
-    "get_clusters_list": "正在从 OCP 拉取集群列表…",
 
     "execute_sql": "正在执行只读 SQL 查询…",
     "get_table_ddl": "正在获取表结构信息…",
+
+    "read_file": "正在读取官方文档…",
+    "list_directory": "正在列出文档目录…",
 }
 
 
@@ -68,13 +75,20 @@ async def stream_chat(
     tools: List[BaseTool],
     messages: List[BaseMessage],
     *,
+    thread_id: str | None = None,
+    checkpointer=None,
     max_seconds: int = 120,
     broker=None,
     confirm_enabled: bool = True,
-    confirm_timeout_seconds: float = 120,
+    # 默认严格小于 max_seconds：两者相等时审批超时永远轮不到触发（load_settings 会校验）
+    confirm_timeout_seconds: float = 90,
     recursion_limit: int = 100,
 ) -> AsyncIterator[dict]:
     """对历史消息运行 agent，产出对外事件流。单轮超时兜底（spec §8.4）。
+
+    thread_id + checkpointer 同时在场时启用会话记忆：本轮 messages 只应包含「新消息」，
+    历史由 langgraph 依据 thread_id 从检查点加载并追加（add_messages 语义）；
+    二者缺一时按无状态处理，此时 messages 需包含完整历史。
 
     max_seconds 只约束 agent 执行（生产者），不因消费端停顿/背压而误中止。
 
@@ -100,46 +114,97 @@ async def stream_chat(
         trigger=trig,
         keep=keep,
     )
-    full: List[BaseMessage] = [SystemMessage(system_prompt(now=datetime.now()))]
-    full.extend(messages)
-
     q: asyncio.Queue = asyncio.Queue()
 
     async def _produce() -> None:
         # 确认中间件在 producer 内构建：owner = 本 producer task，
         # 其 finally 统一 fail_all——流正常结束/断开/异常都不留挂起确认。
-        confirm_mw = build_confirm_middleware(
-            emit=q.put_nowait,
-            broker=broker if confirm_enabled else None,
-            owner=asyncio.current_task(),
-            timeout_seconds=confirm_timeout_seconds,
-        )
-        agent: Runnable = create_agent(
-            model=model,
-            tools=tools,
-            middleware=[confirm_mw, summarization],
-        )
+        # 注意：构建 create_agent / 中间件也可能抛异常，必须一并放进 try：
+        # 否则异常既不投事件也不 fail_all，消费端永久阻塞在 q.get()，
+        # max_seconds 完全失效，且线程锁被占导致该 thread 永久 409。
         try:
+            confirm_mw = build_confirm_middleware(
+                emit=q.put_nowait,
+                broker=broker if confirm_enabled else None,
+                owner=asyncio.current_task(),
+                timeout_seconds=confirm_timeout_seconds,
+            )
+            agent: Runnable = create_agent(
+                model=model,
+                tools=tools,
+                system_prompt=system_prompt(now=datetime.now()),
+                middleware=[confirm_mw, summarization],
+                checkpointer=checkpointer,
+            )
+            # 有检查点且给了 thread_id：messages 只含本轮新消息，历史由 langgraph
+            # 从该 thread 的状态加载（messages 通道是 add_messages 追加语义）。
+            run_config: dict = {"recursion_limit": recursion_limit}
+            if checkpointer is not None and thread_id:
+                run_config["configurable"] = {"thread_id": thread_id}
             async with asyncio.timeout(max_seconds):
+                # run_id → 起始信息，用于把 on_tool_start / on_tool_end 配对成一条轨迹
+                pending: dict[str, dict] = {}
                 # create_agent 返回的是编译后的状态图，输入需按 {"messages": [...]} 传。
                 # 显式注入 recursion_limit：langgraph 运行时 config 会覆盖编译默认，
                 # 从而规避不同 langgraph 版本的默认差异（旧版默认 25，新版 create_agent 内部写 9999）。
                 async for event in agent.astream_events(
-                    {"messages": full},
-                    config={"recursion_limit": recursion_limit},
+                    {"messages": messages},
+                    config=run_config,
                     version="v2",
                 ):
+                    etype = event.get("event")
+                    if etype == "on_tool_start":
+                        pending[str(event.get("run_id") or "")] = {
+                            "name": event.get("name") or "?",
+                            "args": (event.get("data") or {}).get("input") or {},
+                            "t0": time.monotonic(),
+                        }
+                    elif etype == "on_tool_end":
+                        rid = str(event.get("run_id") or "")
+                        started = pending.pop(rid, None) or {}
+                        name = event.get("name") or started.get("name") or "?"
+                        output = (event.get("data") or {}).get("output")
+                        ok, error, rows, truncated = extract_tool_result(output)
+                        t0 = started.get("t0")
+                        # 受 HITL 管控的工具能走到这里，说明用户已批准
+                        controlled = confirm_enabled and broker is not None and name in CONFIRM_TOOL_LABELS
+                        await q.put(tool_trace_event(
+                            run_id=rid,
+                            name=name,
+                            args=started.get("args") or (event.get("data") or {}).get("input") or {},
+                            ok=ok,
+                            error=error,
+                            rows=rows,
+                            truncated=truncated,
+                            approved=True if controlled else None,
+                            duration_ms=int((time.monotonic() - t0) * 1000) if t0 is not None else None,
+                            # 仅 get_sql_explain 会拿到 plan（其余工具返回 None）
+                            plan=extract_plan_view(name, output),
+                        ))
                     user = classify_agent_event(event)
                     if user is not None:
                         await q.put(user)
                 await q.put({"type": "done"})
         except TimeoutError:
-            await q.put({"type": "error", "message": f"agent 执行超过 {max_seconds}s，已中止"})
+            error_id = uuid.uuid4().hex[:8]
+            logger.warning("agent 执行超时 [error_id=%s] max_seconds=%s", error_id, max_seconds)
+            await q.put({
+                "type": "error",
+                "error_id": error_id,
+                "message": f"agent 执行超过 {max_seconds}s，已中止（error_id={error_id}）",
+            })
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("agent 执行失败: %s", e)
-            await q.put({"type": "error", "message": str(e)})
+            # 不把异常原文下发客户端：psycopg/pymysql/httpx 的报错常带 host、库名甚至连接串片段。
+            # 完整堆栈只进服务端日志，客户端拿 error_id 便于对照排查。
+            error_id = uuid.uuid4().hex[:8]
+            logger.exception("agent 执行失败 [error_id=%s]: %s", error_id, e)
+            await q.put({
+                "type": "error",
+                "error_id": error_id,
+                "message": f"agent 执行出错，请稍后重试或凭 error_id 联系管理员（error_id={error_id}）",
+            })
         finally:
             if broker is not None:
                 broker.fail_all(asyncio.current_task(), reason="stream_end")

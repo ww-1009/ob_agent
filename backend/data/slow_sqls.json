@@ -1,0 +1,24 @@
+[
+  {
+    "sql_id": "sq-scan-orders-1",
+    "sql_text": "SELECT * FROM orders WHERE status = 'PAID'",
+    "db_name": "tpcc",
+    "user_name": "app_user",
+    "avg_elapsed_us": 1520000,
+    "max_elapsed_us": 3200000,
+    "exec_count": 1250,
+    "first_seen": "2026-09-01 10:00:00",
+    "last_seen": "2026-09-04 12:00:00"
+  },
+  {
+    "sql_id": "sq-join-customer-2",
+    "sql_text": "SELECT c.name, o.id FROM customer c JOIN orders o ON o.customer_id = c.id WHERE o.status = 'PAID'",
+    "db_name": "tpcc",
+    "user_name": "report_user",
+    "avg_elapsed_us": 860000,
+    "max_elapsed_us": 1900000,
+    "exec_count": 430,
+    "first_seen": "2026-09-02 08:00:00",
+    "last_seen": "2026-09-04 11:30:00"
+  }
+]

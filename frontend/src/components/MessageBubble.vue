@@ -1,5 +1,6 @@
 <script setup>
 import MarkdownBody from './MarkdownBody.vue'
+import ToolTrace from './ToolTrace.vue'
 
 defineProps({
   message: { type: Object, required: true },
@@ -18,6 +19,7 @@ defineProps({
           <span v-for="(s, i) in message.status" :key="i">{{ s }}</span>
         </div>
         <MarkdownBody v-if="message.content" :text="message.content" />
+        <ToolTrace :tools="message.tools || []" />
         <span v-if="message.state === 'streaming'" class="caret"></span>
       </template>
     </div>

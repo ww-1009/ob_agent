@@ -1,0 +1,29 @@
+[
+  {
+    "id": 1001,
+    "clusterId": 1,
+    "clusterName": "obcluster",
+    "obTenantId": 1001,
+    "description": "TPCC 压测租户",
+    "mode": "MYSQL",
+    "name": "tpcc_mysql"
+  },
+  {
+    "id": 1002,
+    "clusterId": 1,
+    "clusterName": "obcluster",
+    "obTenantId": 1002,
+    "description": "报表租户",
+    "mode": "MYSQL",
+    "name": "report_mysql"
+  },
+  {
+    "id": 1003,
+    "clusterId": 1,
+    "clusterName": "obcluster",
+    "obTenantId": 1003,
+    "description": "Oracle 兼容租户",
+    "mode": "ORACLE",
+    "name": "tpch_oracle"
+  }
+]

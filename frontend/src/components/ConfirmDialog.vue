@@ -18,8 +18,8 @@ function startCountdown(expiresIn, requestedAt) {
     countdown.value = Math.max(0, countdown.value - 1)
     if (countdown.value <= 0) {
       stopCountdown()
-      // 后端会超时拒绝并 emit confirm_timeout；本地同步关闭卡片
-      emit('decide', false)
+      // 后端会超时拒绝并 emit confirm_timeout；本地同步关闭卡片（reason 让调用方区分自动超时）
+      emit('decide', false, 'timeout')
     }
   }, 1000)
 }

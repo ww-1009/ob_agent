@@ -4,9 +4,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Sequence
-
-from app.tools.base import ClusterInfo, SlowSqlItem, TenantInfo, TopologyInfo
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 
@@ -21,49 +18,6 @@ class MockOcpClient:
     def _read(self, name: str) -> object:
         p = self._data_dir / name
         return json.loads(p.read_text(encoding="utf-8"))
-
-    def get_topology(self) -> TopologyInfo:
-        data = self._read("topology.json")
-        clusters = []
-        for c in data["clusters"]:
-            tenants = [
-                TenantInfo(
-                    tenant_id=t["tenant_id"],
-                    name=t["name"],
-                    mode=t["mode"],
-                    cluster_id=t.get("cluster_id", c["cluster_id"]),
-                    cluster_name=t.get("cluster_name", c["cluster_name"]),
-                    status=t.get("status", "RUNNING"),
-                )
-                for t in c.get("tenants", [])
-            ]
-            clusters.append(
-                ClusterInfo(
-                    cluster_id=c["cluster_id"],
-                    cluster_name=c["cluster_name"],
-                    tenants=tenants,
-                )
-            )
-        return TopologyInfo(clusters=clusters)
-
-    def list_slow_sql(self, tenant_id: str, top_n: int = 10) -> Sequence[SlowSqlItem]:
-        items = self._read("slow_sqls.json")
-        out = []
-        for it in items[:top_n]:
-            out.append(
-                SlowSqlItem(
-                    sql_id=it["sql_id"],
-                    sql_text=it["sql_text"],
-                    db_name=it.get("db_name", ""),
-                    user_name=it.get("user_name", ""),
-                    avg_elapsed_us=it.get("avg_elapsed_us", 0),
-                    max_elapsed_us=it.get("max_elapsed_us", 0),
-                    exec_count=it.get("exec_count", 0),
-                    first_seen=it.get("first_seen"),
-                    last_seen=it.get("last_seen"),
-                )
-            )
-        return out
 
     # ---- 新版工具面方法（固定夹具，离线 mock 用；字段与 OCP 真实报文同构）----
 

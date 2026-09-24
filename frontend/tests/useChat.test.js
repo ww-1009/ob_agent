@@ -1,12 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, watchEffect } from 'vue'
 import { ChatHttpError, postChat } from '../src/api/chat.js'
+import { ConfirmHttpError, postConfirm } from '../src/api/confirm.js'
 import { useChat } from '../src/composables/useChat.js'
 
 // mock 掉 postChat：保留真实 ChatHttpError（测 503 instanceof），postChat 换成可控 deferred。
 vi.mock('../src/api/chat.js', async (importOriginal) => {
   const actual = await importOriginal()
   return { ...actual, postChat: vi.fn() }
+})
+
+// mock 掉 postConfirm：审批投递失败路径需要逐用例指定状态码
+vi.mock('../src/api/confirm.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, postConfirm: vi.fn() }
 })
 
 // 每个 send 调用记录一条可控 rec；resolve/reject 由用例手动触发以模拟流结束。
@@ -22,6 +29,7 @@ describe('useChat', () => {
   beforeEach(() => {
     recs = []
     vi.mocked(postChat).mockClear()
+    vi.mocked(postConfirm).mockClear()
     // deferred：不自动完成，测试自行 rec.resolve()/reject()
     vi.mocked(postChat).mockImplementation(({ messages, signal, onEvent }) => {
       const rec = { messages, signal, onEvent, resolve: null, reject: null }
@@ -43,7 +51,29 @@ describe('useChat', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.mocked(postChat).mockClear()
+    vi.mocked(postConfirm).mockClear()
   })
+
+  // 发起一轮对话并注入一条待审批卡片，返回清理用的收尾函数
+  function withPendingConfirm() {
+    const chat = useChat()
+    const p = chat.send('执行一下')
+    const rec = recs[0]
+    rec.onEvent({
+      type: 'confirm_request',
+      request_id: 'cf_1',
+      tool: 'execute_sql',
+      tool_label: '执行只读 SQL 查询',
+      args: { sql: 'select * from orders' },
+      expires_in: 120,
+    })
+    const finish = async () => {
+      rec.onEvent({ type: 'done' })
+      rec.resolve()
+      await p
+    }
+    return { chat, finish }
+  }
 
   it('happy：status 去重 + delta 累积 + done 终态，且 history 只带已完成内容', async () => {
     const chat = useChat()
@@ -187,5 +217,72 @@ describe('useChat', () => {
     expect(chat.messages.value).toEqual([])
     expect(chat.llmNotConfigured.value).toBe(false)
     expect(chat.busy.value).toBe(false)
+  })
+
+  it('审批成功：卡片关闭', async () => {
+    const { chat, finish } = withPendingConfirm()
+    vi.mocked(postConfirm).mockResolvedValueOnce({ ok: true })
+    await chat.decideConfirm(true)
+    expect(chat.pendingConfirm.value).toBeNull()
+    await finish()
+  })
+
+  it('审批 404：不再静默关闭卡片，错误可见且允许重试', async () => {
+    const { chat, finish } = withPendingConfirm()
+    vi.mocked(postConfirm).mockRejectedValueOnce(
+      new ConfirmHttpError(404, '确认请求不存在或已过期'),
+    )
+    await chat.decideConfirm(true)
+    expect(chat.pendingConfirm.value).not.toBeNull()
+    expect(chat.pendingConfirm.value.error).toBe('确认请求不存在或已过期')
+    expect(chat.pendingConfirm.value.state).toBe('idle') // 可重试
+    await finish()
+  })
+
+  it('审批 503：卡片保留并提示通道不可用', async () => {
+    const { chat, finish } = withPendingConfirm()
+    vi.mocked(postConfirm).mockRejectedValueOnce(new ConfirmHttpError(503, ''))
+    await chat.decideConfirm(true)
+    expect(chat.pendingConfirm.value.error).toContain('确认通道不可用')
+    expect(chat.pendingConfirm.value.state).toBe('idle')
+    await finish()
+  })
+
+  it('审批 409：已答复/已处理，幂等关闭', async () => {
+    const { chat, finish } = withPendingConfirm()
+    vi.mocked(postConfirm).mockRejectedValueOnce(new ConfirmHttpError(409, ''))
+    await chat.decideConfirm(true)
+    expect(chat.pendingConfirm.value).toBeNull()
+    await finish()
+  })
+
+  it('倒计时到期（reason=timeout）的 404：静默收尾，不显示错误', async () => {
+    const { chat, finish } = withPendingConfirm()
+    vi.mocked(postConfirm).mockRejectedValueOnce(new ConfirmHttpError(404, ''))
+    await chat.decideConfirm(false, 'timeout')
+    expect(chat.pendingConfirm.value).toBeNull()
+    await finish()
+  })
+
+  it('执行计划事件：plan 被存进工具轨迹，其余工具为 null', async () => {
+    const chat = useChat()
+    const p = chat.send('看下执行计划')
+    const rec = recs[0]
+    const plan = {
+      uid: 'plan-8f3a1c02',
+      node_count: 2,
+      nodes: [{ id: '1', depth: 0, operator: 'EXCHANGE OUT' }],
+      summary: [],
+      truncated: false,
+    }
+    rec.onEvent({ type: 'tool', phase: 'end', id: 'ab12cd', name: 'get_sql_explain', ok: true, plan })
+    rec.onEvent({ type: 'tool', phase: 'end', id: 'ef34gh', name: 'get_slow_sql', ok: true })
+    rec.onEvent({ type: 'done' })
+    rec.resolve()
+    await p
+
+    const tools = plainMsgs(chat)[1].tools
+    expect(tools[0].plan).toEqual(plan)
+    expect(tools[1].plan).toBeNull() // 没有 plan 的工具不占位，ToolTrace 不渲染计划块
   })
 })

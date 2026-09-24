@@ -1,0 +1,43 @@
+{
+  "uid": "plan-8f3a1c02",
+  "sqlId": "sq-scan-orders-1",
+  "data": [
+    {
+      "id": 0,
+      "operator": "TABLE SCAN",
+      "name": "orders",
+      "rows": 1280,
+      "cost": 48210,
+      "property": "table: tpcc.orders, range: [NULL, NULL], is_index_back=false",
+      "children": []
+    },
+    {
+      "id": 1,
+      "operator": "EXCHANGE OUT",
+      "name": "distributed",
+      "rows": 1280,
+      "cost": 48230,
+      "property": "distribution method: HASH",
+      "children": [
+        0
+      ]
+    }
+  ],
+  "planOperationSummery": [
+    {
+      "operator": "TABLE SCAN",
+      "count": 1,
+      "rows": 1280,
+      "cost": 48210
+    },
+    {
+      "operator": "EXCHANGE OUT",
+      "count": 1,
+      "rows": 1280,
+      "cost": 20
+    }
+  ],
+  "rootOperations": [
+    1
+  ]
+}

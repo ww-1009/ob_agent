@@ -25,4 +25,10 @@ def system_prompt(now: datetime | None = None) -> str:
         "8. 若工具返回以 __confirm_denied__ 开头，表示用户拒绝或超时未批准该操作：不要重复尝试同一操作，改用其他只读途径或向用户说明无法继续。\n"
         "9. 查询前至多调用一次 get_tenant_info 取得 cluster/tenant 的 id 与名称，后续直接复用，不要反复调用定位/枚举类工具。\n"
         "10. 工具返回 ok:false 或明确错误时，最多再尝试一次不同途径；仍失败就停止在同一路径上空转，改为只读说明或直接答复用户。\n"
+        "11. execute_sql / get_table_ddl 的 tenant_type 决定方言，必须按租户类型写 SQL。"
+        "tenant_type=ORACLE 时：分页用 FETCH FIRST n ROWS ONLY 或 ROWNUM（**没有 LIMIT**）、"
+        "标识符不加反引号、字符串拼接用 ||、取单行常量用 SELECT ... FROM DUAL、日期用 TO_DATE；"
+        "表结构直接调 get_table_ddl（内部走 DBMS_METADATA.GET_DDL），"
+        "列/索引元数据查 USER_TAB_COLUMNS / USER_INDEXES / USER_IND_COLUMNS。"
+        "tenant_type=MYSQL 时用 MySQL 语法（LIMIT、反引号、SHOW CREATE TABLE）。\n"
     )

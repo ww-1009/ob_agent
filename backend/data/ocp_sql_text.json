@@ -1,0 +1,8 @@
+{
+  "sqlId": "sq-scan-orders-1",
+  "fulltext": "SELECT * FROM orders WHERE status = 'PAID'",
+  "dbName": "tpcc",
+  "tables": [
+    "tpcc.orders"
+  ]
+}

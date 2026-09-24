@@ -1,0 +1,55 @@
+# 示例配置：复制为 backend/config.yaml 后填入真实值
+#   cp backend/config.example.yaml backend/config.yaml
+# backend/config.yaml 已被 .gitignore 忽略，不会入库。
+# 配置优先级：环境变量（非空） > backend/config.yaml > 代码默认值
+
+ocp:
+  provider: real            # mock | real（本地离线演示建议 mock）
+  base_url: "http://xxxx:8080"              # real 时填 OCP 4.3.5 网关地址（如 https://<ocp-host>:<port>）
+  username: "xxxx"              # 鉴权：HTTP Basic Auth（OCP 管理账号，非 /login 会话）
+  password: "xxx"
+  verify_ssl: true
+sql_ro:
+  provider: real            # mock | real
+  # 集群名 -> "host:port" 的 dict 字符串；execute_sql / get_table_ddl 按传入的集群名取连接
+  host_map: "{'<cluster-name>': '<obproxy-host>:3306', '<cluster-name-2>': '<obproxy-host-2>:3306'}"
+  username: "xxxxx"
+  password: "xxxx"
+  connect_timeout: 5
+  query_timeout_seconds: 10
+  max_rows: 200
+  # ---- 以下一项仅 Oracle 模式租户使用；MySQL 模式忽略 ----
+  # Oracle 模式：DSN 的 service name 直接取工具传入的 db_name（即 execute_sql / get_table_ddl 的 db_name），
+  #   配置里不再需要 service_name；报 ORA-12514/12505 时说明 db_name 与该租户的 SERVICE_NAME 不一致。
+  driver: oracledb          # oracledb（默认：瘦模式，免 Oracle 客户端库）| cx_oracle（需 Python<=3.10 + Instant Client）
+llm:
+  base_url: "http://xxxxx"   # OpenAI 兼容
+  api_key: "xxxxxxxx"
+  model: "Qwen3.5-MoE-122B-A10B"
+  temperature: 0.7
+  max_input_tokens: 250000
+agent:
+  send_row_data: true       # false 时送入 LLM 的结果不含行数据
+  max_seconds: 180          # 单轮 agent 总时长兜底
+  confirm_db_ops: true      # 变更类操作是否要人工确认（HITL 审批）
+  confirm_timeout_seconds: 120   # 等待人工确认的超时；超时按「拒绝」处理。必须 < max_seconds（否则审批超时不会先触发）
+  recursion_limit: 100      # langgraph 单轮图步数上限，防止工具调用打转
+memory:
+  enabled: false            # true 时启用会话记忆（依赖 PostgreSQL，详见 README「会话记忆」）
+  # dsn 非空则优先，可整体覆盖下面的分项连接信息
+  dsn: ""
+  host: "127.0.0.1"
+  port: 5432
+  user: "xxxx"
+  password: "xxxx"
+  dbname: "llm_db"
+  pool_min_size: 1
+  pool_max_size: 5
+  list_limit: 50            # GET /api/threads 默认条数上限
+  messages_limit: 500       # GET /api/threads/{id}/messages 默认条数上限
+  audit_retention_days: 0   # >0 时启动清理更早的审计行；0 = 永久保留（审计默认只增不删）
+  open_timeout_seconds: 5   # 启动时打开连接的等待上限（PG 不可用要尽快降级，别拖住启动）
+  open_attempts: 2          # 启动尝试次数；最坏启动阻塞 ≈ open_attempts × open_timeout_seconds + 退避
+auth:
+  enabled: false            # true 时除 /api/health 外所有 /api 都要求 Bearer 令牌
+  token: ""                 # 与 enabled=true 搭配；为空会导致后端拒绝启动（fail closed）

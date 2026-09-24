@@ -123,7 +123,7 @@ async def test_middleware_deny_short_circuits_handler():
         events.append(ev)
 
     mw = build_confirm_middleware(emit=emit, broker=broker, timeout_seconds=5)
-    req = _Req("get_table_ddl", {"table_name": "orders"})
+    req = _Req("execute_sql", {"sql": "select 1"})
 
     async def deny_soon():
         for _ in range(200):
@@ -147,10 +147,13 @@ async def test_middleware_timeout_denies_and_emits_timeout_event():
         events.append(ev)
 
     mw = build_confirm_middleware(emit=emit, broker=broker, timeout_seconds=0.1)
-    out = await mw.awrap_tool_call(_Req("get_slow_sql", {}), _handler)
+    out = await mw.awrap_tool_call(_Req("execute_sql", {"sql": "select 1"}), _handler)
+    await asyncio.sleep(0)  # _emit 对 async emit 只 ensure_future，让调度的事件任务先跑完
     assert out.status == "error"
     assert "超时" in out.content
-    assert events[-1] == {"type": "confirm_timeout", "request_id": events[0]["request_id"]}
+    # confirm_timeout 之后还会补发一条被拒绝的 tool_trace 事件，故按类型查找而非取最后一个
+    timeout_evs = [e for e in events if e["type"] == "confirm_timeout"]
+    assert timeout_evs == [{"type": "confirm_timeout", "request_id": events[0]["request_id"]}]
     assert broker.pending_count == 0
 
 
@@ -161,9 +164,7 @@ async def test_middleware_transparent_without_broker():
     assert out.content == "executed"  # 无 broker：不拦截
 
 
-def test_confirm_labels_cover_db_tools():
-    # 与 build_tools 的 DB 工具名同步（不含 get_tenant_info 与文件工具）
-    assert set(CONFIRM_TOOL_LABELS) == {
-        "execute_sql", "get_table_ddl",
-        "get_slow_sql", "get_full_sql_text", "get_sql_top_plan", "get_sql_explain",
-    }
+def test_confirm_labels_only_gate_execute_sql():
+    # 当前设计：仅直连租户执行 SQL 的 execute_sql 需要人工确认；
+    # 其余 OCP 只读查询与文件工具不拦截（见 confirm.py:30-35 注释）
+    assert set(CONFIRM_TOOL_LABELS) == {"execute_sql"}

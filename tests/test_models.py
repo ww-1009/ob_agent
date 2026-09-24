@@ -1,64 +1,4 @@
-from app.tools.base import (
-    ClusterInfo,
-    OcpClient,
-    QueryResult,
-    SqlExecutionError,
-    SqlExecutor,
-    SlowSqlItem,
-    TenantInfo,
-    TopologyInfo,
-)
-
-
-class _FakeOcpClient:
-    def get_topology(self):
-        return None
-
-    def list_slow_sql(self, tenant_id: str, top_n: int = 10):
-        return []
-
-
-class _FakeSqlExecutor:
-    def query(self, sql: str):
-        return None
-
-    def explain(self, sql: str):
-        return None
-
-
-def test_slow_sql_item_json_roundtrip():
-    item = SlowSqlItem(
-        sql_id="abc123",
-        sql_text="select 1",
-        db_name="shop",
-        user_name="u1",
-        avg_elapsed_us=1000,
-        max_elapsed_us=2000,
-        exec_count=10,
-        first_seen="2026-08-01T00:00:00",
-        last_seen="2026-08-01T01:00:00",
-    )
-    data = item.model_dump()
-    assert data["sql_id"] == "abc123"
-    assert SlowSqlItem.model_validate(data) == item
-
-
-def test_topology_nesting():
-    t = TopologyInfo(
-        clusters=[
-            ClusterInfo(
-                cluster_id="c1",
-                cluster_name="obcluster-1",
-                tenants=[
-                    TenantInfo(
-                        tenant_id="1001", name="tpcc_mysql", mode="mysql",
-                        cluster_id="c1", cluster_name="obcluster-1", status="RUNNING",
-                    )
-                ],
-            )
-        ]
-    )
-    assert t.clusters[0].tenants[0].mode == "mysql"
+from app.tools.base import OcpClient, QueryResult, SqlExecutionError, SqlExecutor
 
 
 def test_query_result_defaults_truncated_false():
@@ -85,6 +25,9 @@ def test_sql_execution_error_is_value_error():
 
 
 def test_protocols_are_runtime_checkable():
-    assert isinstance(_FakeOcpClient(), OcpClient)
-    assert isinstance(_FakeSqlExecutor(), SqlExecutor)
+    from app.tools.ocp.mock import MockOcpClient
+    from app.tools.sql.mock import MockSqlExecutor
+
+    assert isinstance(MockOcpClient(), OcpClient)
+    assert isinstance(MockSqlExecutor(), SqlExecutor)
     assert not isinstance(object(), SqlExecutor)

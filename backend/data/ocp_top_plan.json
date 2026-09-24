@@ -1,0 +1,14 @@
+[
+  {
+    "uid": "plan-8f3a1c02",
+    "sqlId": "sq-scan-orders-1",
+    "avgElapsedTime": 1520.0,
+    "firstLoadTime": "2026-09-01 10:00:12"
+  },
+  {
+    "uid": "plan-8f3a1c07",
+    "sqlId": "sq-scan-orders-1",
+    "avgElapsedTime": 1640.0,
+    "firstLoadTime": "2026-09-03 09:12:40"
+  }
+]

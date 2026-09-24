@@ -1,0 +1,35 @@
+{
+  "orders": {
+    "columns": [
+      "id",
+      "customer_id",
+      "status",
+      "total_amount",
+      "created_at"
+    ],
+    "rows": [
+      [1, 42, "PAID", 128.5, "2026-09-01 10:00:00"],
+      [2, 43, "PAID", 64.0, "2026-09-01 11:20:00"],
+      [3, 42, "PENDING", 12.3, "2026-09-02 09:05:00"],
+      [4, 44, "CANCELLED", 300.0, "2026-09-02 15:40:00"],
+      [5, 45, "PAID", 88.8, "2026-09-03 08:15:00"],
+      [6, 46, "PENDING", 45.6, "2026-09-03 19:30:00"],
+      [7, 42, "PAID", 210.0, "2026-09-04 12:00:00"]
+    ]
+  },
+  "customer": {
+    "columns": [
+      "id",
+      "name",
+      "city",
+      "vip_level"
+    ],
+    "rows": [
+      [42, "Bob", "Hangzhou", 3],
+      [43, "Alice", "Shanghai", 1],
+      [44, "Carol", "Shenzhen", 2],
+      [45, "Dave", "Beijing", 1],
+      [46, "Eve", "Chengdu", 4]
+    ]
+  }
+}

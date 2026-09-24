@@ -10,14 +10,11 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import OcpConfig, load_settings
-from app.tools.base import (
-    ClusterInfo,
-    OcpClientError
-)
+from app.tools.base import OcpClientError
 from app.tools.ocp import get_ocp_client
 
 # ---------- 模块级常量 ----------
@@ -85,16 +82,11 @@ def _normalize_mode(v) -> str:
     raise OcpClientError(f"未知/缺失 OCP 租户 mode: {v!r}")
 
 
-def _iso_utc(dt: datetime) -> str:
-    """datetime → 'YYYY-MM-DDTHH:MM:SSZ'（UTC，无小数秒，结尾 Z）。"""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 class RealOcpClient:
     """OCP real HTTP 客户端：Basic Auth + envelope 归一 。
 
     异常统一：配置/依赖缺失、HTTP/传输失败、报文形状异常、映射阶段异常全部归一为
-    OcpClientError；成功返回共享模型（TopologyInfo / SlowSqlItem）。
+    OcpClientError；成功时返回归一化后的 dict / list（字段与 OCP 报文同构，由工具层再加工）。
     httpx 在 __init__ 不 import（模块顶层不依赖 httpx，离线可 import），仅在使用时懒加载。
     """
 
@@ -194,8 +186,8 @@ class RealOcpClient:
         :param server_id:查询在指定 OceanBase 服务器上的计划的性能。不指定时，查询 SQL 在所有服务器上的计划的性能。
         :param cluster_id:集群的 ID。
         :param tenant_id:租户的 ID。
-        :param start_time:查看慢 SQL 历史参数的起始时间。该时间只支持 UTC 时间，格式为：YYYY-MM-DDThh:mm:ssZ。
-        :param end_time:查看慢 SQL 历史参数的结束时间。该时间只支持 UTC 时间，格式为：YYYY-MM-DDThh:mm:ssZ。
+        :param start_time:起始时间，形如 2026-02-16T05:32:16+08:00；默认取当前时间往前 30 分钟。
+        :param end_time:结束时间，形如 2026-02-16T05:32:16+08:00；默认取当前时间。
         :return:
         """
         self._require_base_url()
