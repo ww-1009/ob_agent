@@ -16,7 +16,7 @@ from typing import Sequence
 from langchain_core.tools import BaseTool, tool
 from langchain_community.agent_toolkits import FileManagementToolkit
 from app.agent.tool_input import SlowSqlInput, FullSqlTextInput, SqlTopPlanInput, ExecuteSqlInput, SqlExplainInput, \
-     TableDDLInput
+     TableDDLInput, ClusterIdInput
 from app.config import SqlConfig, load_settings
 from app.tools.base import OcpClient, OcpClientError, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import ReadOnlyViolation, assert_read_only
@@ -85,6 +85,49 @@ def _error(exc: BaseException) -> str:
     logger.warning("工具执行失败 [error_id=%s] %s: %s", error_id, type(exc).__name__, exc)
     return _fail(f"{message}（错误编号 {error_id}）", kind=kind)
 
+# ---- 资源水位（OCP stats / serverStats）----
+# 两个 stats 接口返回的字段很多（含 timestamp、zone、各种 min/max 冗余项），全量下发会把
+# 上下文挤占掉；这里按「判断水位需要什么」做白名单裁剪。
+_CLUSTER_STATS_KEYS = (
+    "clusterId", "clusterName", "clusterType", "syncStatus", "tenantCount", "unitCount",
+    "cpuTotal", "cpuAssigned", "cpuTotalMin", "cpuTotalMax", "cpuAssignedMin", "cpuAssignedMax",
+    "memoryTotalByte", "memoryAssignedByte", "systemMemoryByte",
+    "dataDiskTotalByte", "dataDiskUsedByte",
+    "logDiskTotalByte", "logDiskAssignedByte", "logDiskUsedByte",
+)
+_SERVER_STATS_KEYS = (
+    "ip", "port", "zone", "partitionCount", "unitCount",
+    "cpuTotal", "cpuAssigned", "cpuAssignedMin", "cpuAssignedMax",
+    "memoryTotalByte", "memoryAssignedByte", "systemMemoryByte",
+    "dataDiskTotalByte", "dataDiskUsedByte",
+    "logDiskTotalByte", "logDiskAssignedByte", "logDiskUsedByte",
+)
+# (已用/已分配字段, 总量字段, 追加的水位字段)
+_WATER_LEVEL_PAIRS = (
+    ("cpuAssigned", "cpuTotal", "cpuAssignedPct"),
+    ("memoryAssignedByte", "memoryTotalByte", "memoryAssignedPct"),
+    ("dataDiskUsedByte", "dataDiskTotalByte", "dataDiskUsedPct"),
+    ("logDiskUsedByte", "logDiskTotalByte", "logDiskUsedPct"),
+)
+
+
+def _water_level_row(item: dict, keys: Sequence[str]) -> dict:
+    """裁剪字段并补上百分比水位。
+
+    百分比在这里算而不是交给模型：字节数对比很容易算错，且分母为 0 的假 0% 会误导
+    诊断。分母缺失或为 0 时**不补**该字段，让模型看到的是「无数据」而不是「零水位」。
+    """
+    row = {k: item[k] for k in keys if k in item}
+    for part_key, total_key, out_key in _WATER_LEVEL_PAIRS:
+        part, total = row.get(part_key), row.get(total_key)
+        if not isinstance(part, (int, float)) or isinstance(part, bool):
+            continue
+        if not isinstance(total, (int, float)) or isinstance(total, bool) or not total:
+            continue
+        row[out_key] = round(part * 100 / total, 2)
+    return row
+
+
 def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant_type: str, sql_config: SqlConfig):
     """按配置返回 SQL 执行器。
 
@@ -149,7 +192,7 @@ def build_tools(
 
     # 初始化文件管理 Toolkit，指定根目录和所需工具
     file_tools = FileManagementToolkit(
-        root_dir="./ob_wiki",  # 限制 Agent 只能在该目录下读写文件，保障安全性
+        root_dir="./doc",  # 限制 Agent 只能在该目录下读取文档（backend/doc/ob_wiki 下的官方文档解压产物），保障安全性
         selected_tools=[
             "read_file",
             "list_directory",
@@ -189,6 +232,56 @@ def build_tools(
         except Exception as e:
             return _error(e)
 
+    @tool
+    def get_cluster_list() -> str:
+        """获取所有 OceanBase 集群及其集群 ID"""
+        target_keys = {"id", "name", "clusterName", "status", "region", "obVersion", "serverCount"}
+        try:
+            cluster_list = ocp.get_clusters_list()
+            filtered_items: list[dict] = []
+            for item in cluster_list:
+                if not isinstance(item, dict):
+                    continue
+                # id 与 tenant 侧同理重命名为 clusterId：后续资源水位工具要的就是它
+                out = {k: v for k, v in item.items() if k in target_keys}
+                if "id" in out:
+                    out["clusterId"] = out.pop("id")
+                filtered_items.append(out)
+            if not filtered_items:
+                return _fail("未获取到任何 OceanBase 集群", kind="not_found")
+            return _ok(items=filtered_items)
+        except Exception as e:
+            return _error(e)
+
+    @tool(args_schema=ClusterIdInput)
+    def get_cluster_resource_stats(cluster_id: int) -> str:
+        """获取指定集群的整体资源水位（CPU/内存/数据盘/日志盘）"""
+        try:
+            data = ocp.get_cluster_resource_stats(cluster_id)
+            if not isinstance(data, dict) or not data:
+                return _fail(
+                    f"集群 {cluster_id} 没有资源统计信息（集群 ID 不存在或未被采样到）",
+                    kind="not_found",
+                )
+            return _ok(items=[_water_level_row(data, _CLUSTER_STATS_KEYS)])
+        except Exception as e:
+            return _error(e)
+
+    @tool(args_schema=ClusterIdInput)
+    def get_server_resource_stats(cluster_id: int) -> str:
+        """获取集群内各 OBServer 节点的资源水位，用于定位单节点倾斜"""
+        try:
+            server_list = ocp.get_server_resource_stats(cluster_id)
+            rows = [
+                _water_level_row(item, _SERVER_STATS_KEYS)
+                for item in server_list or []
+                if isinstance(item, dict)
+            ]
+            if not rows:
+                return _fail(f"集群 {cluster_id} 没有 OBServer 资源统计信息", kind="not_found")
+            return _ok(items=rows)
+        except Exception as e:
+            return _error(e)
 
     @tool(args_schema=SlowSqlInput)
     def get_slow_sql(cluster_id: int, tenant_id: int,start_time: str,end_time: str,sql_text_length: int,server_id: int, inner: bool,
@@ -305,7 +398,8 @@ def build_tools(
         except Exception as e:
             return _error(e)
 
-    return [get_tenant_info, get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, execute_sql,get_table_ddl]+file_tools
+    return [get_tenant_info, get_cluster_list, get_cluster_resource_stats, get_server_resource_stats,
+            get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, execute_sql,get_table_ddl]+file_tools
 
 if __name__ == '__main__':
     settings = load_settings()

@@ -30,3 +30,18 @@ def test_get_slow_sql_reads_fixture_and_honours_limit(client):
     }
     assert items[0]["sqlId"] in fixture_ids
     assert items[0]["avgElapsedTime"] > 0
+
+
+def test_cluster_resource_stats_follow_cluster_id(client):
+    stats = client.get_cluster_resource_stats(1)
+    assert stats["clusterName"] == "obcluster"
+    assert stats["cpuTotal"] > 0
+    # 集群不存在返回空对象，工具层据此报 not_found（而不是把空值当成零水位）
+    assert client.get_cluster_resource_stats(999) == {}
+
+
+def test_server_resource_stats_follow_cluster_id(client):
+    servers = client.get_server_resource_stats(1)
+    assert len(servers) == 3
+    assert {s["zone"] for s in servers} == {"zone1", "zone2", "zone3"}
+    assert client.get_server_resource_stats(999) == []

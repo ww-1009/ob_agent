@@ -76,8 +76,17 @@ class MockOcpClient:
     def get_sql_explain(self, cluster_id, tenant_id, uid, start_time, end_time):
         return self._read("ocp_sql_explain.json")
 
+    def _cluster_ids(self) -> set[str]:
+        return {str(c.get("id")) for c in self._read("ocp_clusters.json")}
+
     def get_cluster_resource_stats(self, cluster_id):
-        return {}
+        """返回扁平的 ClusterResourceStats；集群不存在时返回 {}（工具层据此报 not_found）。"""
+        if str(cluster_id) not in self._cluster_ids():
+            return {}
+        return self._read("ocp_cluster_stats.json")
 
     def get_server_resource_stats(self, cluster_id):
-        return []
+        """返回 ServerResourceStats 列表；集群不存在时返回 []。"""
+        if str(cluster_id) not in self._cluster_ids():
+            return []
+        return self._read("ocp_server_stats.json")

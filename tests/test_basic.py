@@ -25,6 +25,9 @@ from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysq
 
 _EXPECTED_TOOLS = {
     "get_tenant_info",
+    "get_cluster_list",
+    "get_cluster_resource_stats",
+    "get_server_resource_stats",
     "get_slow_sql",
     "get_full_sql_text",
     "get_sql_top_plan",
@@ -75,6 +78,45 @@ def test_get_tenant_info_ok(tools):
     data = json.loads(tools["get_tenant_info"].invoke({}))
     assert data["ok"] is True
     assert isinstance(data["items"], list) and data["items"]
+
+
+def test_get_cluster_list_renames_id(tools):
+    data = json.loads(tools["get_cluster_list"].invoke({}))
+    assert data["ok"] is True
+    (row,) = data["items"]
+    # 原始字段 id 重命名为 clusterId，供资源水位工具直接使用
+    assert row["clusterId"] == 1 and row["name"] == "obcluster"
+    assert "id" not in row
+
+
+def test_get_cluster_resource_stats_adds_water_level_pct(tools):
+    data = json.loads(tools["get_cluster_resource_stats"].invoke({"cluster_id": 1}))
+    assert data["ok"] is True
+    (row,) = data["items"]
+    assert row["cpuAssignedPct"] == 50.0  # 12 / 24
+    assert row["memoryAssignedPct"] == 66.67  # 64GiB / 96GiB
+    assert row["dataDiskUsedPct"] == 25.0
+    # 白名单外的冗余字段不下发（夹具里带了 obClusterId）
+    assert "obClusterId" not in row
+
+
+def test_get_server_resource_stats_reports_per_node_skew(tools):
+    data = json.loads(tools["get_server_resource_stats"].invoke({"cluster_id": 1}))
+    assert data["ok"] is True
+    assert len(data["items"]) == 3
+    hot = data["items"][2]
+    assert hot["ip"] == "10.0.0.13"
+    assert hot["cpuAssignedPct"] == 87.5
+    assert hot["memoryAssignedPct"] == 93.75
+    assert "timestamp" not in hot  # 采样时间在白名单外，不下发
+
+
+def test_resource_stats_unknown_cluster_is_not_found(tools):
+    # 空结果不是成功：模型必须能区分「水位为 0」与「没取到数据」
+    for name in ("get_cluster_resource_stats", "get_server_resource_stats"):
+        data = json.loads(tools[name].invoke({"cluster_id": 999}))
+        assert data["ok"] is False
+        assert data["error_kind"] == "not_found"
 
 
 def test_get_slow_sql_respects_limit(tools):
