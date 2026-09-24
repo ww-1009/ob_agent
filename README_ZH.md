@@ -63,7 +63,8 @@ ob_agent/
 │   │   │   ├── model.py      # 构建 ChatOpenAI
 │   │   │   ├── prompt.py     # System Prompt（DBA 助手 + 规则）
 │   │   │   ├── confirm.py    # HITL 人工确认通道（ConfirmationBroker + 中间件）
-│   │   │   ├── tools.py      # 10 个 DBA 工具 + 2 个只读文档文件工具（共注册 12 个）
+│   │   │   ├── tools.py      # 10 个 DBA 工具 + search_docs/read_doc + 2 个只读文档文件工具（共注册 14 个）
+│   │   │   ├── doc_index.py  # ob_wiki FTS5 索引：建库 / 检索 / 按小节读取
 │   │   │   └── tool_input.py # 工具入参 Pydantic 模型
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
@@ -333,8 +334,9 @@ agent 的**意外异常不会原文下发**：客户端只拿到一句通用文�
 1. **`backend/config.yaml`** 与 **`backend/.env`**：按[配置说明](#配置说明)生成并填写真实值。
 2. **`backend/doc/`**：OceanBase 官方文档知识库目录。仓库自带压缩包
    `backend/doc/ob_wiki.zip`，部署时在该目录下就地解压即可，解压得到 `backend/doc/ob_wiki/`（解压产物已被 gitignore）。
-   System Prompt 约定文档入口为 `./doc/ob_wiki/README.md`；由于文件工具根目录限定为 `./doc`，agent 实际以
-   `ob_wiki/README.md` 相对路径只读引用。**缺少该目录会导致文档检索功能不可用**。
+   agent 通过 `search_docs` / `read_doc` 两个工具使用它（全文检索 + 按小节精读），底层是 SQLite FTS5 索引
+   `backend/doc/ob_wiki.index.db`——这是**构建产物**，同样 gitignore，缺失或语料变化时会自动重建（5100+ 篇约 5 秒）。
+   `read_file` / `list_directory` 仍保留用于浏览目录，根目录限定 `./doc`。**缺少该目录会导致文档检索功能不可用**。
 3. **PostgreSQL**（仅当 `memory.enabled: true`）：可连的实例 + 能在 `public` 下建表的账号。检查点与历史表由后端首次启动时自建，见[会话记忆（PostgreSQL）](#会话记忆postgresql)。
 
 > 运行目录约定：后端以 `backend/` 为工作目录运行（`run.sh` 会 `cd` 到脚本所在目录），
@@ -490,4 +492,5 @@ curl -N -X POST https://your-domain.example.com/api/chat \
 - **SSE**：客户端断开时确认服务端真中止（无孤儿 task）。
 - **LLM**：配置完成后，mock/演示提示改为按 provider 注入（当前 prompt 已不再内嵌 mock 提示）。
 - **资源水位**：已实现 —— 新增 `get_cluster_list`、`get_cluster_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/stats`，返回扁平 `ClusterResourceStats`）与 `get_server_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/serverStats`，返回 `data.contents` 列表）。工具层按白名单裁剪字段并补出 `cpuAssignedPct` / `memoryAssignedPct` / `dataDiskUsedPct` / `logDiskUsedPct` 水位百分比；取不到数据时按 `not_found` 返回 `ok:false`，避免把「无数据」误读成「零水位」。待联调确认：真实报文字段名与文档一致（CPU 为核数，内存/磁盘为 Byte），以及是否需要传采样时间窗。
+- **文档检索**：已实现 —— `search_docs` / `read_doc` 取代「逐级猜目录名、再整篇读文件」（`backend/app/agent/doc_index.py`）。语料做了中文预分词（CJK 单字 + 双字）后建 FTS5 external-content 索引（`tokenize='unicode61'`），所以「事务」「索引」「锁」这类双字查询能命中（SQLite `trigram` 分词器做不到）。检索直接返回命中的**小节** + 可读摘要 + `score`；提问里写的模式（MySQL/Oracle）和版本号会自动识别为过滤条件（否则同名文档无法区分）；导航页 `index.md` 默认不参与，正文里的导航型小节（`相关文档` / `参见` / `更多信息`）额外降权——它们只指路，答案以正文为准，`read_doc` 再按小节精读并返回 `sections` 目录。真实语料实测：5146 篇 → 25077 个分块、索引 67.7 MB、重建约 5 秒、单次查询 0–8 ms。
 - **Oracle 租户**：已实现 —— `execute_sql` / `get_table_ddl` 现已把 Oracle 模式租户路由到 OCI 驱动（`backend/app/tools/sql/oracle.py`）。DSN 的 service name 直接取工具的 `db_name` 参数（即该租户的 SERVICE_NAME），不再从配置读取；只读账号无 `@` 时补成 `user@tenant#cluster`。`get_table_ddl` 以 `db_name` 作 DDL 的 owner，回退 SQL 为 `all_tab_columns where owner = <db_name>`。`connect_timeout` / `query_timeout_seconds` 只传给支持它们的驱动（`oracledb` 瘦模式两者都支持；`cx_Oracle` 无 `tcp_connect_timeout`（跳过），`call_timeout` 仅在版本支持时设置，跳过时记 debug 日志）。待联调确认：该租户的 SERVICE_NAME 是否与你传入的 `db_name` 一致（不一致会报 ORA-12514/12505）、以及是否开放 `DBMS_METADATA.GET_DDL`。注意 `cx_Oracle` 无 Python ≥ 3.11 轮子，故 `driver` 默认 `oracledb`（瘦模式，无需 Oracle 客户端库）。
