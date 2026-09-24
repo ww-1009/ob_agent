@@ -63,7 +63,7 @@ ob_agent/
 │   │   │   ├── model.py      # 构建 ChatOpenAI
 │   │   │   ├── prompt.py     # System Prompt（DBA 助手 + 规则）
 │   │   │   ├── confirm.py    # HITL 人工确认通道（ConfirmationBroker + 中间件）
-│   │   │   ├── tools.py      # 7 个 DBA 工具 + 2 个只读文档文件工具（共注册 9 个）
+│   │   │   ├── tools.py      # 10 个 DBA 工具 + 2 个只读文档文件工具（共注册 12 个）
 │   │   │   └── tool_input.py # 工具入参 Pydantic 模型
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
@@ -82,7 +82,7 @@ ob_agent/
 │   ├── config.yaml           # 实际配置（已 gitignore，不再被 git 跟踪）
 │   ├── .env.example          # 示例环境变量（入库）
 │   └── .env                  # 实际环境变量（已 gitignore，不再被 git 跟踪）
-│   ├── ob_wiki/              # OceanBase 官方文档知识库（gitignore，运行时需就位）
+│   ├── doc/                  # ob_wiki.zip（入库）+ ob_wiki/（就地解压的官方文档，gitignore）
 │   └── data/                 # mock fixtures（已入库；real_*.json 被 gitignore）
 ├── frontend/                 # Vue 3 + Vite 前端
 │   ├── src/                  # 组件 / composables / api / lib
@@ -93,7 +93,7 @@ ob_agent/
 └── README.md
 ```
 
-> 说明：`backend/ob_wiki/`、`backend/config.yaml`、`backend/.env`、`frontend/dist/`、`.venv/`、
+> 说明：`backend/doc/`（`ob_wiki.zip` 除外）、`backend/config.yaml`、`backend/.env`、`frontend/dist/`、`.venv/`、
 > `node_modules/` 等生产/本地产物均已被 `.gitignore` 排除，**不会**通过 git 分发，见[部署注意事项](#第-0-步准备运行时数据重要)。
 
 ---
@@ -151,14 +151,15 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
 
 | 夹具 | 被谁使用 |
 | --- | --- |
-| `ocp_tenants.json`、`ocp_clusters.json` | `get_tenant_info` |
+| `ocp_tenants.json`、`ocp_clusters.json` | `get_tenant_info`、`get_cluster_list` |
+| `ocp_cluster_stats.json`、`ocp_server_stats.json` | `get_cluster_resource_stats`、`get_server_resource_stats` |
 | `ocp_slow_sqls.json`（首条 `sqlId` 为 `sq-scan-orders-1`） | `get_slow_sql` |
 | `ocp_sql_text.json`、`ocp_top_plan.json`、`ocp_sql_explain.json` | `get_full_sql_text`、`get_sql_top_plan`、`get_sql_explain` |
 | `sample_tables.json` | `execute_sql`，以及 `get_table_ddl` 背后合成的 `SHOW CREATE TABLE` |
 | `slow_sqls.json` | `execute_sql` 背后 mock 的 `oceanbase.gv$sql_audit` 路径 |
 | `explain_results.json` | mock 的 `EXPLAIN` 匹配表 |
 
-当 `ocp.provider: mock` **且** `sql_ro.provider: mock` 时，7 个工具全部改由这些夹具作答，因此在既连不上 OCP、也连不上数据库的环境下演示仍可跑通。`real_*.json` 用于存放抓取的真实响应，仍被 gitignore。
+当 `ocp.provider: mock` **且** `sql_ro.provider: mock` 时，10 个 DBA 工具全部改由这些夹具作答，因此在既连不上 OCP、也连不上数据库的环境下演示仍可跑通。`real_*.json` 用于存放抓取的真实响应，仍被 gitignore。
 
 ### 前端
 
@@ -330,12 +331,14 @@ agent 的**意外异常不会原文下发**：客户端只拿到一句通用文�
 `backend/`` 工作目录下：
 
 1. **`backend/config.yaml`** 与 **`backend/.env`**：按[配置说明](#配置说明)生成并填写真实值。
-2. **`backend/ob_wiki/`**：OceanBase 官方文档知识库目录。System Prompt 约定文档入口为
-   `./ob_wiki/README.md`，agent 通过文件工具（根目录限定在该目录）只读引用。**缺少该目录会导致文档检索功能不可用**。
+2. **`backend/doc/`**：OceanBase 官方文档知识库目录。仓库自带压缩包
+   `backend/doc/ob_wiki.zip`，部署时在该目录下就地解压即可，解压得到 `backend/doc/ob_wiki/`（解压产物已被 gitignore）。
+   System Prompt 约定文档入口为 `./doc/ob_wiki/README.md`；由于文件工具根目录限定为 `./doc`，agent 实际以
+   `ob_wiki/README.md` 相对路径只读引用。**缺少该目录会导致文档检索功能不可用**。
 3. **PostgreSQL**（仅当 `memory.enabled: true`）：可连的实例 + 能在 `public` 下建表的账号。检查点与历史表由后端首次启动时自建，见[会话记忆（PostgreSQL）](#会话记忆postgresql)。
 
 > 运行目录约定：后端以 `backend/` 为工作目录运行（`run.sh` 会 `cd` 到脚本所在目录），
-> 使 `./ob_wiki`、`./config.yaml`的相对路径生效。
+> 使 `./doc`、`./config.yaml`的相对路径生效。
 
 ### 第 1 步：后端部署
 
@@ -359,7 +362,7 @@ cd /path/to/ob_agent/backend
 
 - `--host 127.0.0.1`：后端只监听本机，由外部反向代理（Nginx）对外提供 443/80。
 - `--workers`：**必须保持 1。** 人工确认（HITL）通道（前端只带 `request_id` POST 到 `/api/chat/confirm`）与同一 thread 的串行锁都是**进程内**状态：多 worker 时审批可能落到从未持有该待确认请求的进程（404/503），且两个 worker 可能同时跑同一 thread 并写同一个 Postgres 检查点。需要横向扩展时，必须在网关按 `thread_id` 做粘性路由并自行保证同一 thread 单写——当前版本不提供该能力。
-- 全程保持 `cd backend` 以确保 `./ob_wiki`、`./config.yaml` 相对路径正确。
+- 全程保持 `cd backend` 以确保 `./doc`、`./config.yaml` 相对路径正确。
 
 ### 第 2 步：前端构建与静态资源托管
 
@@ -485,5 +488,6 @@ curl -N -X POST https://your-domain.example.com/api/chat \
 - **real OCP**：端点与鉴权按 OCP 4.3.5 官方文档填充（现为 NotImplementedError 骨架）。
 - **real SQL**：EXPLAIN 计划语义、大结果集游标（SSCursor）、`ob_query_timeout` 与只读账号授权范围。
 - **SSE**：客户端断开时确认服务端真中止（无孤儿 task）。
-- **LLM**：配置完成后，mock/演示提示（system prompt 规则 6）改为按 provider 注入。
+- **LLM**：配置完成后，mock/演示提示改为按 provider 注入（当前 prompt 已不再内嵌 mock 提示）。
+- **资源水位**：已实现 —— 新增 `get_cluster_list`、`get_cluster_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/stats`，返回扁平 `ClusterResourceStats`）与 `get_server_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/serverStats`，返回 `data.contents` 列表）。工具层按白名单裁剪字段并补出 `cpuAssignedPct` / `memoryAssignedPct` / `dataDiskUsedPct` / `logDiskUsedPct` 水位百分比；取不到数据时按 `not_found` 返回 `ok:false`，避免把「无数据」误读成「零水位」。待联调确认：真实报文字段名与文档一致（CPU 为核数，内存/磁盘为 Byte），以及是否需要传采样时间窗。
 - **Oracle 租户**：已实现 —— `execute_sql` / `get_table_ddl` 现已把 Oracle 模式租户路由到 OCI 驱动（`backend/app/tools/sql/oracle.py`）。DSN 的 service name 直接取工具的 `db_name` 参数（即该租户的 SERVICE_NAME），不再从配置读取；只读账号无 `@` 时补成 `user@tenant#cluster`。`get_table_ddl` 以 `db_name` 作 DDL 的 owner，回退 SQL 为 `all_tab_columns where owner = <db_name>`。`connect_timeout` / `query_timeout_seconds` 只传给支持它们的驱动（`oracledb` 瘦模式两者都支持；`cx_Oracle` 无 `tcp_connect_timeout`（跳过），`call_timeout` 仅在版本支持时设置，跳过时记 debug 日志）。待联调确认：该租户的 SERVICE_NAME 是否与你传入的 `db_name` 一致（不一致会报 ORA-12514/12505）、以及是否开放 `DBMS_METADATA.GET_DDL`。注意 `cx_Oracle` 无 Python ≥ 3.11 轮子，故 `driver` 默认 `oracledb`（瘦模式，无需 Oracle 客户端库）。
