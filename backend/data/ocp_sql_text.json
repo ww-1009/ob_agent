@@ -1,8 +1,14 @@
 {
-  "sqlId": "sq-scan-orders-1",
-  "fulltext": "SELECT * FROM orders WHERE status = 'PAID'",
-  "dbName": "tpcc",
-  "tables": [
-    "tpcc.orders"
-  ]
+    "dbName": "DDP",
+    "fulltext": "SELECT count(0)\nFROM WARN_RULE_TOTAL WRT\n\tINNER JOIN EMP_MSG_RMNDR_RULE ER ON ER.STATUS = ?\n\tAND ER.EMP_ID = WRT.EMP_ID\n\tAND EXISTS (\n\t\tSELECT ?\n\t\tFROM SYS_USER_QW SUQ\n\t\tWHERE ER.EMP_ID = SUQ.USER_ID\n\t)\n\tAND ER.EVENT_TP = WRT.WARN_SUB_CD \nWHERE (WRT.WARN_SUB_CD = ?)\n\tAND WRT.WARN_ACCT_TYPE = ?\n\tAND WRT.CUST_NO IS NOT NULL\n\tAND WRT.CUST_NM IS NOT NULL\n\tAND nvl(WRT.is_read, ?) = ?\n\tAND nvl(WRT.we_send_flg, ?) = ?",
+    "sqlId": "40D23E66AB30153766573AB4751DC33B",
+    "sqlType": "SELECT",
+    "statement": "SELECT count(0)\nFROM WARN_RULE_TOTAL WRT\n\tINNER JOIN EMP_MSG_RMNDR_RULE ER ON ER.STATUS = ?\n\tAND ER.EMP_ID = WRT.EMP_ID\n\tAND EXISTS (\n\t\tSELECT ?\n\t\tFROM SYS_USER_QW SUQ\n\t\tWHERE ER.EMP_ID = SUQ.USER_ID\n\t)\n\tAND ER.EVENT_TP = WRT.WARN_SUB_CD \nWHERE (WRT.WARN_SUB_CD = ?)\n\tAND WRT.WARN_ACCT_TYPE = ?\n\tAND WRT.CUST_NO IS NOT NULL\n\tAND WRT.CUST_NM IS NOT NULL\n\tAND nvl(WRT.is_read, ?) = ?\n\tAND nvl(WRT.we_send_flg, ?) = ?",
+    "supportOutline": true,
+    "tables": [
+        "WARN_RULE_TOTAL(WRT)",
+        "EMP_MSG_RMNDR_RULE(ER)",
+        "SYS_USER_QW(SUQ)"
+    ],
+    "userName": "DDP"
 }

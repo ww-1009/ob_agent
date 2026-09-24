@@ -1,43 +1,313 @@
 {
-  "uid": "plan-8f3a1c02",
-  "sqlId": "sq-scan-orders-1",
-  "data": [
-    {
-      "id": 0,
-      "operator": "TABLE SCAN",
-      "name": "orders",
-      "rows": 1280,
-      "cost": 48210,
-      "property": "table: tpcc.orders, range: [NULL, NULL], is_index_back=false",
-      "children": []
-    },
-    {
-      "id": 1,
-      "operator": "EXCHANGE OUT",
-      "name": "distributed",
-      "rows": 1280,
-      "cost": 48230,
-      "property": "distribution method: HASH",
-      "children": [
-        0
-      ]
-    }
-  ],
-  "planOperationSummery": [
-    {
-      "operator": "TABLE SCAN",
-      "count": 1,
-      "rows": 1280,
-      "cost": 48210
-    },
-    {
-      "operator": "EXCHANGE OUT",
-      "count": 1,
-      "rows": 1280,
-      "cost": 20
-    }
-  ],
-  "rootOperations": [
-    1
-  ]
+    "data": [
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 1958,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 0,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": "PHY_SCALAR_AGGREGATE",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 1
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 1958,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 1,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": " PHY_HASH_JOIN",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 1
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 12,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 2,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": "  PHY_MERGE_JOIN",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 2
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 7,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 3,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": "   PHY_SORT",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 5
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 6,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 4,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "ER",
+            "Operator": "    PHY_TABLE_SCAN",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "table_rows:37, physical_range_rows:37, logical_range_rows:37, index_back_rows:0, output_rows:4, avaiable_index_name[EMP_MSG_RMNDR_RULE], estimation info[table_id:1172232, (table_type:10, version:-1--1--1, logical_rc:37, physical_rc:37)]",
+            "Rows": 5
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 4,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 5,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "SUQ",
+            "Operator": "   PHY_TABLE_SCAN",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "table_rows:27, physical_range_rows:27, logical_range_rows:27, index_back_rows:0, output_rows:27, avaiable_index_name[SYS_USER_QW], estimation info[table_id:520644, (table_type:10, version:-1--1--1, logical_rc:27, physical_rc:27)]",
+            "Rows": 27
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 1945,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 6,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": "  PHY_PX_FIFO_COORD",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 1
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 1944,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 7,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": "   PHY_PX_REDUCE_TRANSMIT",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 1
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 1942,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 8,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "NULL",
+            "Operator": "    PHY_GRANULE_ITERATOR",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "NULL",
+            "Rows": 1
+        },
+        {
+            "ClusterName": "test_shrbank_ob001",
+            "CollectTimeUs": 1790208000000000,
+            "Cost": 1942,
+            "CreateTime": "2026-09-24 00:05:16",
+            "FirstLoadTimeUs": 1790150700143276,
+            "Id": 9,
+            "ObClusterId": 1725936723,
+            "ObServerId": 4,
+            "ObTenantId": 1022,
+            "ObjectName": "WRT(WARN_RULE_TOTAL_INDEX_N1)",
+            "Operator": "     PHY_TABLE_SCAN",
+            "PlanId": 5409895,
+            "PlanUnionHash": "6c7446448426a58390a6d60626459f83",
+            "Property": "table_rows:971070, physical_range_rows:1, logical_range_rows:1, index_back_rows:0, output_rows:0, avaiable_index_name[WARN_RULE_TOTAL_INDEX_N1,WARN_RULE_TOTAL_INDEX_N2,WARN_RULE_TOTAL], unstable_index_name[WARN_RULE_TOTAL]",
+            "Rows": 1
+        }
+    ],
+    "notEmpty": true,
+    "planOperationSummery": [
+        {
+            "objectName": "NULL",
+            "operator": "PHY_SCALAR_AGGREGATE"
+        },
+        {
+            "objectName": "NULL",
+            "operator": " PHY_HASH_JOIN"
+        },
+        {
+            "objectName": "NULL",
+            "operator": "  PHY_MERGE_JOIN"
+        },
+        {
+            "objectName": "NULL",
+            "operator": "   PHY_SORT"
+        },
+        {
+            "objectName": "ER",
+            "operator": "    PHY_TABLE_SCAN"
+        },
+        {
+            "objectName": "SUQ",
+            "operator": "   PHY_TABLE_SCAN"
+        },
+        {
+            "objectName": "NULL",
+            "operator": "  PHY_PX_FIFO_COORD"
+        },
+        {
+            "objectName": "NULL",
+            "operator": "   PHY_PX_REDUCE_TRANSMIT"
+        },
+        {
+            "objectName": "NULL",
+            "operator": "    PHY_GRANULE_ITERATOR"
+        },
+        {
+            "objectName": "WRT(WARN_RULE_TOTAL_INDEX_N1)",
+            "operator": "     PHY_TABLE_SCAN"
+        }
+    ],
+    "rootOperations": [
+        {
+            "children": [
+                {
+                    "children": [
+                        {
+                            "children": [
+                                {
+                                    "children": [
+                                        {
+                                            "cost": 6,
+                                            "id": 4,
+                                            "objectName": "ER",
+                                            "operator": "PHY_TABLE_SCAN",
+                                            "property": "table_rows:37, physical_range_rows:37, logical_range_rows:37, index_back_rows:0, output_rows:4, avaiable_index_name[EMP_MSG_RMNDR_RULE], estimation info[table_id:1172232, (table_type:10, version:-1--1--1, logical_rc:37, physical_rc:37)]",
+                                            "rows": 5
+                                        }
+                                    ],
+                                    "cost": 7,
+                                    "id": 3,
+                                    "objectName": "NULL",
+                                    "operator": "PHY_SORT",
+                                    "property": "NULL",
+                                    "rows": 5
+                                },
+                                {
+                                    "cost": 4,
+                                    "id": 5,
+                                    "objectName": "SUQ",
+                                    "operator": "PHY_TABLE_SCAN",
+                                    "property": "table_rows:27, physical_range_rows:27, logical_range_rows:27, index_back_rows:0, output_rows:27, avaiable_index_name[SYS_USER_QW], estimation info[table_id:520644, (table_type:10, version:-1--1--1, logical_rc:27, physical_rc:27)]",
+                                    "rows": 27
+                                }
+                            ],
+                            "cost": 12,
+                            "id": 2,
+                            "objectName": "NULL",
+                            "operator": "PHY_MERGE_JOIN",
+                            "property": "NULL",
+                            "rows": 2
+                        },
+                        {
+                            "children": [
+                                {
+                                    "children": [
+                                        {
+                                            "children": [
+                                                {
+                                                    "cost": 1942,
+                                                    "id": 9,
+                                                    "objectName": "WRT(WARN_RULE_TOTAL_INDEX_N1)",
+                                                    "operator": "PHY_TABLE_SCAN",
+                                                    "property": "table_rows:971070, physical_range_rows:1, logical_range_rows:1, index_back_rows:0, output_rows:0, avaiable_index_name[WARN_RULE_TOTAL_INDEX_N1,WARN_RULE_TOTAL_INDEX_N2,WARN_RULE_TOTAL], unstable_index_name[WARN_RULE_TOTAL]",
+                                                    "rows": 1
+                                                }
+                                            ],
+                                            "cost": 1942,
+                                            "id": 8,
+                                            "objectName": "NULL",
+                                            "operator": "PHY_GRANULE_ITERATOR",
+                                            "property": "NULL",
+                                            "rows": 1
+                                        }
+                                    ],
+                                    "cost": 1944,
+                                    "id": 7,
+                                    "objectName": "NULL",
+                                    "operator": "PHY_PX_REDUCE_TRANSMIT",
+                                    "property": "NULL",
+                                    "rows": 1
+                                }
+                            ],
+                            "cost": 1945,
+                            "id": 6,
+                            "objectName": "NULL",
+                            "operator": "PHY_PX_FIFO_COORD",
+                            "property": "NULL",
+                            "rows": 1
+                        }
+                    ],
+                    "cost": 1958,
+                    "id": 1,
+                    "objectName": "NULL",
+                    "operator": "PHY_HASH_JOIN",
+                    "property": "NULL",
+                    "rows": 1
+                }
+            ],
+            "cost": 1958,
+            "id": 0,
+            "objectName": "NULL",
+            "operator": "PHY_SCALAR_AGGREGATE",
+            "property": "NULL",
+            "rows": 1
+        }
+    ]
 }
