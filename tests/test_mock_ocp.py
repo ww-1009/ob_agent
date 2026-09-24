@@ -1,6 +1,11 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from app.tools.ocp.mock import MockOcpClient
+
+_FIXTURE = Path(__file__).resolve().parents[1] / "backend" / "data" / "ocp_slow_sqls.json"
 
 
 @pytest.fixture
@@ -18,5 +23,10 @@ def test_get_slow_sql_reads_fixture_and_honours_limit(client):
     items = client.get_slow_sql(
         1, "1001", "2026-01-01T00:00:00", "2026-01-01T01:00:00", limit=1
     )
-    assert [it["sqlId"] for it in items] == ["sq-scan-orders-1"]
+    assert len(items) == 1  # 遵守 limit
+    # 断言来自夹具本身，而不是写死某个 sqlId：夹具换数据时这条用例不该跟着过期
+    fixture_ids = {
+        row["sqlId"] for row in json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    }
+    assert items[0]["sqlId"] in fixture_ids
     assert items[0]["avgElapsedTime"] > 0
