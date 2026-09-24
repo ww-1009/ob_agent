@@ -1,14 +1,26 @@
 """执行计划的可视化视图（服务端归一化，前端只负责渲染）。
 
-OCP 的 explain 报文是一张「节点表 + children 引用」的图::
+OCP 的 explain 报文有两种形态，本模块都收：
 
-    {"data": [{"id": 1, "operator": "EXCHANGE OUT", "name": "distributed",
-               "rows": 1280, "cost": 48230, "property": "...", "children": [0]}],
-     "planOperationSummery": [{"operator": "TABLE SCAN", "count": 1, ...}],
-     "rootOperations": [1]}
+1. 真实 OCP 报文：``data`` 是与树同序的**扁平**节点表（键首字母大写：``Id`` / ``Operator`` /
+   ``Rows`` / ``Cost`` / ``Property`` / ``ObjectName``，没有 ``children``），真正的树在
+   ``rootOperations`` —— 嵌套 dict，键为小写 ``id`` / ``operator`` / ``children``::
 
-直接丢给前端，前端要自己重建树、还要防环；mock fixture 与真实报文的键名差异也得各写一遍。
-这里一次性归一成「先序 + depth」的扁平列表与算子汇总，前端只做渲染。
+       {"data": [{"Id": 0, "Operator": "PHY_SCALAR_AGGREGATE", "Rows": 1, "Cost": 1958}],
+        "planOperationSummery": [{"operator": "PHY_SCALAR_AGGREGATE", "objectName": "NULL"}],
+        "rootOperations": [{"id": 0, "operator": "PHY_SCALAR_AGGREGATE",
+                            "children": [{"id": 1, "operator": "PHY_HASH_JOIN"}]}]}
+
+2. 旧 mock 与联调期变体：``data`` 自带小写键与 ``children``（子节点 id 或内联子节点对象），
+   ``rootOperations`` 只给根节点 id::
+
+       {"data": [{"id": 1, "operator": "EXCHANGE OUT", "name": "distributed",
+                  "children": [0]}],
+        "planOperationSummery": [{"operator": "TABLE SCAN", "count": 1, ...}],
+        "rootOperations": [1]}
+
+直接丢给前端，前端要自己重建树、还要防环，还得把两种键名各写一遍。这里一次性归一成
+「先序 + depth」的扁平列表与算子汇总，前端只做渲染。
 
 只在 get_sql_explain 成功时挂到 tool 事件上，且不含任何行数据：算子名、估算行数、代价都是
 计划元信息。节点数有上限，避免一份巨大计划把 SSE 与前端拖垮。
@@ -58,24 +70,62 @@ def _pick(payload: dict, *keys: str) -> Any:
     return None
 
 
-def _index_nodes(raw: list) -> tuple[dict[str, dict], dict[str, list[str]]]:
-    """登记所有节点，返回（节点表, 每个节点的子键列表）。
+def _blank(value: Any) -> bool:
+    """OCP 用字面量 ``"NULL"`` 表示「没有」，与空值一样归一成空。"""
+    text = "" if value is None else str(value)
+    return text.strip() == "" or text.strip().upper() == "NULL"
+
+
+def _display(item: dict, *keys: str, limit: int = _MAX_TEXT_CHARS) -> str:
+    """取首个「有内容」的显示字段。
+
+    键名按序尝试：真实报文用首字母大写（``Operator`` / ``ObjectName``），旧 mock 用小写；
+    字面量 ``"NULL"`` 视为空，前端不必显示一串 ``NULL``。缩进用的前导空格也一并去掉。
+    """
+    for key in keys:
+        value = item.get(key)
+        if not _blank(value):
+            return _text(value, limit).strip()
+    return ""
+
+
+def _children_of(item: dict) -> Any:
+    return _pick(item, "children", "Children")
+
+
+def _tree_of(declared: Any) -> list[dict] | None:
+    """真实 OCP 报文的树在 ``rootOperations``（嵌套 dict）；``data`` 只是同序的扁平节点表。
+
+    只有确实带嵌套子节点时才按树解析，否则交回 ``data``（兼容「data + 根 id 列表」的形态）。
+    """
+    if not isinstance(declared, list):
+        return None
+    items = [item for item in declared if isinstance(item, dict)]
+    if not items or not any(_children_of(item) for item in items):
+        return None
+    return items
+
+
+def _index_nodes(raw: list) -> tuple[dict[str, dict], dict[str, list[str]], list[str]]:
+    """登记所有节点，返回（节点表, 每个节点的子键列表, 顶层键列表）。
 
     节点 id 缺失时用位置序号兜底；children 里既可能是子节点 id（OCP 实际报文），
-    也可能是内联的子节点对象（联调期见过的变体），两种都收。
+    也可能是内联的子节点对象（联调期见过的变体），两种都收。键名大小写不敏感。
     """
     nodes: dict[str, dict] = {}
     children: dict[str, list[str]] = {}
+    top: list[str] = []
 
     def register(item: Any, fallback: str) -> str | None:
         if not isinstance(item, dict):
             return None
-        key = str(item["id"]) if item.get("id") is not None else fallback
+        raw_id = _pick(item, "id", "Id")
+        key = str(raw_id) if raw_id is not None else fallback
         if key in nodes:  # 重复引用：第一次为准
             return key
         nodes[key] = item
         kids: list[str] = []
-        for idx, child in enumerate(item.get("children") or []):
+        for idx, child in enumerate(_children_of(item) or []):
             if isinstance(child, dict):
                 sub = register(child, f"{key}.{idx}")
                 if sub is not None:
@@ -86,8 +136,10 @@ def _index_nodes(raw: list) -> tuple[dict[str, dict], dict[str, list[str]]]:
         return key
 
     for i, item in enumerate(raw):
-        register(item, f"node-{i}")
-    return nodes, children
+        key = register(item, f"node-{i}")
+        if key is not None:
+            top.append(key)
+    return nodes, children, top
 
 
 def _roots(nodes: dict[str, dict], children: dict[str, list[str]], declared: Any) -> list[str]:
@@ -124,18 +176,56 @@ def _walk(nodes: dict[str, dict], children: dict[str, list[str]], roots: list[st
     return out
 
 
-def _summarize(raw: Any) -> list[dict]:
+def _summarize(raw: Any, nodes: dict[str, dict]) -> list[dict]:
+    """算子汇总。
+
+    真实报文的 ``planOperationSummery`` 只给算子名与对象名（没有次数/行数/代价），且形态是
+    「一行一个节点」的算子清单（算子名用前导空格表缩进），与节点表逐行对应：此时逐行用对应
+    节点的 rows / cost 补齐。若它对不上节点表（旧 mock 是「一行一个算子」的聚合表），则按算子
+    汇总补齐：count = 该算子的节点数，rows / cost = 各节点求和。报文自己带了数字时以报文为准。
+    """
     if not isinstance(raw, list):
         return []
-    out = []
-    for item in raw[:_MAX_SUMMARY_ROWS]:
-        if not isinstance(item, dict):
+    rows = [item for item in raw[:_MAX_SUMMARY_ROWS] if isinstance(item, dict)]
+    node_list = list(nodes.values())
+
+    per_node = len(rows) == len(node_list) and all(
+        _display(row, "operator", "Operator") == _display(node, "operator", "Operator")
+        for row, node in zip(rows, node_list)
+    )
+    totals: dict[str, dict[str, int]] = {}
+    for item in node_list:
+        operator = _display(item, "operator", "Operator")
+        if not operator:
             continue
+        agg = totals.setdefault(operator, {"count": 0, "rows": 0, "cost": 0})
+        agg["count"] += 1
+        agg["rows"] += _int(_pick(item, "rows", "Rows")) or 0
+        agg["cost"] += _int(_pick(item, "cost", "Cost")) or 0
+
+    out = []
+    for idx, item in enumerate(rows):
+        operator = _display(item, "operator", "Operator")
+        count = _int(_pick(item, "count", "Count"))
+        row_count = _int(_pick(item, "rows", "Rows"))
+        cost = _int(_pick(item, "cost", "Cost"))
+        if per_node:
+            node = node_list[idx]
+            count = 1 if count is None else count
+            if row_count is None:
+                row_count = _int(_pick(node, "rows", "Rows"))
+            if cost is None:
+                cost = _int(_pick(node, "cost", "Cost"))
+        else:
+            agg = totals.get(operator, {})
+            count = count if count is not None else agg.get("count")
+            row_count = row_count if row_count is not None else agg.get("rows")
+            cost = cost if cost is not None else agg.get("cost")
         out.append({
-            "operator": _text(item.get("operator")),
-            "count": _int(item.get("count")),
-            "rows": _int(item.get("rows")),
-            "cost": _int(item.get("cost")),
+            "operator": operator,
+            "count": count,
+            "rows": row_count,
+            "cost": cost,
         })
     return out
 
@@ -144,13 +234,21 @@ def build_plan_view(payload: Any) -> dict | None:
     """OCP explain 报文（或工具返回里的同构片段）→ 可视化视图；不成形返回 None。"""
     if not isinstance(payload, dict):
         return None
-    raw = _pick(payload, "data", "plan_data")
-    if not isinstance(raw, list) or not raw:
-        return None
-    nodes, children = _index_nodes(raw)
+    declared = _pick(payload, "rootOperations", "root_operations")
+    tree = _tree_of(declared)
+    if tree is not None:
+        # 真实报文：树在 rootOperations，data 只是与树同序的扁平节点表
+        nodes, children, roots = _index_nodes(tree)
+    else:
+        raw = _pick(payload, "data", "plan_data")
+        if not isinstance(raw, list) or not raw:
+            return None
+        nodes, children, top = _index_nodes(raw)
+        if not nodes:
+            return None
+        roots = _roots(nodes, children, declared) or top
     if not nodes:
         return None
-    roots = _roots(nodes, children, _pick(payload, "rootOperations", "root_operations"))
     ordered = _walk(nodes, children, roots)
     return {
         "uid": _text(payload.get("uid")),
@@ -160,15 +258,19 @@ def build_plan_view(payload: Any) -> dict | None:
             {
                 "id": key,
                 "depth": depth,
-                "operator": _text(nodes[key].get("operator")),
-                "name": _text(nodes[key].get("name")),
-                "rows": _int(nodes[key].get("rows")),
-                "cost": _int(nodes[key].get("cost")),
-                "property": _text(nodes[key].get("property"), _MAX_PROPERTY_CHARS),
+                "operator": _display(nodes[key], "operator", "Operator"),
+                "name": _display(nodes[key], "name", "objectName", "ObjectName"),
+                "rows": _int(_pick(nodes[key], "rows", "Rows")),
+                "cost": _int(_pick(nodes[key], "cost", "Cost")),
+                "property": _display(
+                    nodes[key], "property", "Property", limit=_MAX_PROPERTY_CHARS
+                ),
             }
             for key, depth in ordered[:_MAX_NODES]
         ],
-        "summary": _summarize(_pick(payload, "planOperationSummery", "plan_operation_summery")),
+        "summary": _summarize(
+            _pick(payload, "planOperationSummery", "plan_operation_summery"), nodes
+        ),
         "node_count": len(ordered),
         "truncated": len(ordered) > _MAX_NODES,
     }

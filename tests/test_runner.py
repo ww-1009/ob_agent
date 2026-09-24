@@ -147,7 +147,8 @@ async def test_e2e_tool_result_fed_back_to_model():
 
     delta = "".join(e.get("text", "") for e in events if e["type"] == "delta")
     assert delta.startswith("工具返回摘要")  # 走的是 read-back 组合文本，而非罐头预设
-    assert "sq-scan-orders-1" in delta  # 来自真实工具返回（ocp_slow_sqls.json 第一条 sqlId）
+    assert "avgElapsedTime" in delta  # 来自真实工具返回（ocp_slow_sqls.json 的字段）
+    assert '"ok": true' in delta  # 回传的是工具信封，而不是罐头预设文本
 
 
 @pytest.mark.asyncio
@@ -191,13 +192,16 @@ async def test_e2e_explain_tool_event_carries_plan_view():
     tool_ev = tool_events[0]
     assert tool_ev["ok"] is True and tool_ev["name"] == "get_sql_explain"
     plan = tool_ev["plan"]
-    assert plan["uid"] == "plan-8f3a1c02" and plan["sql_id"] == "sq-scan-orders-1"
-    assert [(n["operator"], n["depth"]) for n in plan["nodes"]] == [
-        ("EXCHANGE OUT", 0),
-        ("TABLE SCAN", 1),
+    # uid 来自工具参数；真实 OCP 报文不带 sqlId（那是 top_plan 的字段）
+    assert plan["uid"] == "plan-8f3a1c02" and plan["sql_id"] == ""
+    assert plan["node_count"] == 10
+    assert [(n["operator"], n["depth"]) for n in plan["nodes"]][:3] == [
+        ("PHY_SCALAR_AGGREGATE", 0),
+        ("PHY_HASH_JOIN", 1),
+        ("PHY_MERGE_JOIN", 2),
     ]
-    assert plan["nodes"][1]["name"] == "orders" and plan["nodes"][1]["cost"] == 48210
-    assert plan["summary"][0]["operator"] == "TABLE SCAN"
+    assert plan["nodes"][4]["name"] == "ER" and plan["nodes"][4]["cost"] == 6
+    assert plan["summary"][0]["operator"] == "PHY_SCALAR_AGGREGATE"
     assert plan["truncated"] is False
 
 
