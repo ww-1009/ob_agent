@@ -125,7 +125,7 @@ def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant
     if tenant_type == "ORACLE":
         oracle_cfg = SqlConfig(
             **common,
-            # 基础账号：Oracle 由 resolve_config 补成 user@tenant；漏掉会让用户名变成 "@租户"
+            # 基础账号：Oracle 由 resolve_config 补成 user@tenant#cluster；漏掉会让用户名变成 "@租户"
             username=sql_config.username,
             driver=sql_config.driver,
         )
