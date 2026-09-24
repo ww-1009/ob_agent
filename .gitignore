@@ -25,6 +25,8 @@ llm_db/
 .vscode/
 .jbeval/
 
-ob_wiki/
+# OceanBase 官方文档：zip 入库，解压产物不入库（部署时在 backend/doc 下解压，见 README 第 0 步）
+/backend/doc/*
+!/backend/doc/ob_wiki.zip
 
 .DS_Store/
