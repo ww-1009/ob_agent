@@ -75,13 +75,10 @@ def make_type_handler(drv):
     return handler
 
 
-def resolve_config(cfg: SqlConfig, tenant_name: str) -> SqlConfig:
+def resolve_config(cfg: SqlConfig, tenant_name: str, cluster_name:str) -> SqlConfig:
     """把 sql_ro 的通用配置解析成「本租户可直连」的 Oracle 配置。
 
-    Oracle 模式的租户信息不写在用户名里（与 MySQL 的 ``user@tenant#cluster`` 不同），
-    而是通过 DSN 的 service_name 让 ODP 路由到对应租户，用户名只带租户名。
-
-    - username：配置里已含 ``@`` 就原样用，否则补成 ``user@tenant``
+    - username：配置里已含 ``@`` 就原样用，否则补成 ``user@tenant#cluster_name``
     - service name：直接取工具传入的 ``cfg.db_name`` —— ``execute_sql`` /
       ``get_table_ddl`` 的 ``db_name`` 参数就是本租户的 service name，配置里不再有
       service name 这一项。Oracle 模式没有「库名」概念，所以解析结果写回
@@ -89,7 +86,7 @@ def resolve_config(cfg: SqlConfig, tenant_name: str) -> SqlConfig:
       正常调用不会为空）。
     """
     base = (cfg.username or "").strip()
-    username = base if "@" in base else f"{base}@{tenant_name}"
+    username = base if "@" in base else f"{base}@{tenant_name}#{cluster_name}"
     return replace(
         cfg,
         username=username,
@@ -124,12 +121,12 @@ class OracleSqlExecutor(PooledSqlExecutor):
             user=self._cfg.username,
             password=self._cfg.password,
             dsn=build_dsn(self._cfg),
-            tcp_connect_timeout=self._cfg.connect_timeout,
+            #tcp_connect_timeout=self._cfg.connect_timeout,
         )
         # 类型转换必须在执行任何查询之前挂上
         conn.outputtypehandler = make_type_handler(drv)
         # call_timeout 单位是毫秒（pymysql 的 read_timeout 是秒）
-        conn.call_timeout = int(self._cfg.query_timeout_seconds) * 1000
+        #conn.call_timeout = int(self._cfg.query_timeout_seconds) * 1000
         return conn
 
     def _is_connection_error(self, exc: BaseException) -> bool:
@@ -141,17 +138,11 @@ class OracleSqlExecutor(PooledSqlExecutor):
         """表结构：优先 DBMS_METADATA.GET_DDL（等价于 MySQL 的 SHOW CREATE TABLE）。
 
         部分 OceanBase Oracle 租户未开放 DBMS_METADATA，此时回退到数据字典
-        （USER_TAB_COLUMNS），至少把列定义返回给模型，而不是整体报错。
+        （dba_tab_columns），至少把列定义返回给模型，而不是整体报错。
         """
-        safe = assert_safe_identifier(table_name, "表名")
-        owner, _, obj = safe.rpartition(".")
-        if not obj:  # 没有 schema 前缀：rpartition 会把整串放在 owner 里
-            owner, obj = "", owner
-
-        if owner:
-            ddl_sql = f"select dbms_metadata.get_ddl('TABLE', '{obj}', '{owner}') as ddl from dual"
-        else:
-            ddl_sql = f"select dbms_metadata.get_ddl('TABLE', '{obj.upper()}') as ddl from dual"
+        table_name = assert_safe_identifier(table_name, "表名").upper()
+        db_name = self._cfg.db_name.upper()
+        ddl_sql = f"select dbms_metadata.get_ddl('TABLE', '{table_name}', '{db_name}') as ddl from dual"
         try:
             return self._run(ddl_sql)
         except SqlExecutionError:
@@ -161,7 +152,7 @@ class OracleSqlExecutor(PooledSqlExecutor):
             # Oracle 里未加引号的表名默认大写存储
             fallback_sql = (
                 "select column_name, data_type, data_length, data_precision, data_scale, nullable "
-                f"from user_tab_columns where table_name = '{obj.upper()}' order by column_id"
+                f"from dba_tab_columns where table_name = '{table_name}' order by column_id"
             )
             try:
                 return self._run(fallback_sql)

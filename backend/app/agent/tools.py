@@ -130,8 +130,8 @@ def _create_db_connect(tenant_name: str, cluster_name: str, db_name: str, tenant
             driver=sql_config.driver,
         )
         # Oracle 模式：DSN 的 service name 取本工具的 db_name（见 oracle.resolve_config），
-        # 用户名补成 user@tenant；这里不能再传 service_name —— 配置项已移除。
-        return OracleSqlExecutor(resolve_oracle_config(oracle_cfg, tenant_name))
+        # 用户名补成 user@tenant#cluster_name。
+        return OracleSqlExecutor(resolve_oracle_config(oracle_cfg, tenant_name, cluster_name))
 
     # MySQL 模式：租户与集群写在用户名里 user@tenant#cluster
     return MysqlSqlExecutor(resolve_mysql_config(
