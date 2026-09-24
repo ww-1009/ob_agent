@@ -44,6 +44,8 @@ TOOL_STATUS: Dict[str, str] = {
     "execute_sql": "正在执行只读 SQL 查询…",
     "get_table_ddl": "正在获取表结构信息…",
 
+    "search_docs": "正在检索官方文档…",
+    "read_doc": "正在精读官方文档…",
     "read_file": "正在读取官方文档…",
     "list_directory": "正在列出文档目录…",
 }

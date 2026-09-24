@@ -34,6 +34,8 @@ _EXPECTED_TOOLS = {
     "get_sql_explain",
     "execute_sql",
     "get_table_ddl",
+    "search_docs",
+    "read_doc",
     "read_file",
     "list_directory",
 }

@@ -105,3 +105,39 @@ class TableDDLInput(BaseModel):
 
 class ClusterIdInput(BaseModel):
     cluster_id: int = Field(description="集群的 ID（由 get_cluster_list 获取）")
+
+
+class DocSearchInput(BaseModel):
+    query: str = Field(
+        description="检索词或问题。中文优先用 2-4 字的核心词（如「锁等待」「资源水位」「事务隔离级别」），"
+                    "多个词用空格分隔；不要带「怎么/如何/什么」这类疑问词"
+    )
+    limit: Optional[int] = Field(description="返回的相关小节数量，默认 5，最大 20", default=5)
+    mode: Optional[str] = Field(
+        description="按租户模式过滤：MYSQL 或 ORACLE。不填时若提问里明确写了模式会自动识别；"
+                    "文档库中 MySQL/Oracle 模式有同名文档，提问涉及模式时务必过滤",
+        default=None
+    )
+    version: Optional[str] = Field(
+        description="按 OceanBase 版本过滤，如 4.2.5。不填时若提问里写了版本号会自动识别",
+        default=None
+    )
+    include_index: Optional[bool] = Field(
+        description="是否把导航索引页也纳入结果（默认否：索引页只指路，答案以正文为准）",
+        default=False
+    )
+
+
+class DocReadInput(BaseModel):
+    path: str = Field(
+        description="文档路径，取自 search_docs 返回的 path（相对 ./doc，形如 "
+                    "ob_wiki/OceanBase 数据库/参考指南/…/合并异常问题排查.md）"
+    )
+    section: Optional[str] = Field(
+        description="小节名或关键词（如「典型案例」「设置方法」）；不填则返回文档开头，"
+                    "响应里的 sections 字段可用于挑选小节",
+        default=None
+    )
+    max_chars: Optional[int] = Field(
+        description="最多返回的字符数，默认 6000，最大 20000", default=None
+    )

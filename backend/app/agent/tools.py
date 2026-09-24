@@ -16,7 +16,15 @@ from typing import Sequence
 from langchain_core.tools import BaseTool, tool
 from langchain_community.agent_toolkits import FileManagementToolkit
 from app.agent.tool_input import SlowSqlInput, FullSqlTextInput, SqlTopPlanInput, ExecuteSqlInput, SqlExplainInput, \
-     TableDDLInput, ClusterIdInput
+     TableDDLInput, ClusterIdInput, DocSearchInput, DocReadInput
+from app.agent.doc_index import (
+    DEFAULT_READ_CHARS,
+    DEFAULT_LIMIT,
+    DocIndexError,
+    DocIndexMissing,
+    DocPathError,
+    get_index,
+)
 from app.config import SqlConfig, load_settings
 from app.tools.base import OcpClient, OcpClientError, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import ReadOnlyViolation, assert_read_only
@@ -398,8 +406,45 @@ def build_tools(
         except Exception as e:
             return _error(e)
 
+    @tool(args_schema=DocSearchInput)
+    def search_docs(query: str, limit: int = DEFAULT_LIMIT, mode: str = "",
+                    version: str = "", include_index: bool = False) -> str:
+        """检索 OceanBase 官方文档，返回相关小节（优先用它定位，再用 read_doc 精读该小节）"""
+        try:
+            hits = get_index().search(
+                query, limit=limit or DEFAULT_LIMIT, mode=mode or "",
+                version=version or "", include_index=bool(include_index),
+            )
+        except DocIndexMissing as e:
+            return _fail(str(e), kind="not_found")
+        except DocIndexError as e:
+            return _fail(str(e), kind="error")
+        payload = {
+            "query": query,
+            "hits": hits,
+            "hit_count": len(hits),
+        }
+        if not hits:
+            # 空结果不是错误，但要让模型知道该怎么办：换成更短的核心词再试
+            payload["hint"] = "未检索到相关小节：请改用 2-4 字的核心词（去掉疑问词/长句）后重试"
+        return _ok(**payload)
+
+    @tool(args_schema=DocReadInput)
+    def read_doc(path: str, section: str = "", max_chars: int = 0) -> str:
+        """精读官方文档的指定小节（path 来自 search_docs 返回的 path）"""
+        try:
+            doc = get_index().read(
+                path, section=section or "", max_chars=max_chars or DEFAULT_READ_CHARS
+            )
+        except DocPathError as e:
+            return _fail(str(e), kind="not_found")
+        except DocIndexError as e:
+            return _fail(str(e), kind="error")
+        return _ok(**doc)
+
     return [get_tenant_info, get_cluster_list, get_cluster_resource_stats, get_server_resource_stats,
-            get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, execute_sql,get_table_ddl]+file_tools
+            get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, execute_sql,get_table_ddl,
+            search_docs, read_doc]+file_tools
 
 if __name__ == '__main__':
     settings = load_settings()

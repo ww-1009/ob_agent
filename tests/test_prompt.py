@@ -17,11 +17,13 @@ def test_system_prompt_no_placeholder():
 
 
 def test_system_prompt_points_at_doc_dir_and_all_views():
-    """文档入口指向 ./doc/ob_wiki（文件工具根目录是 ./doc，故路径不含 ./doc 前缀）；
+    """文档入口指向 ./doc/ob_wiki，并指明检索工具（文件工具根目录是 ./doc）；
     Oracle 元数据必须查 ALL_* + owner，不能再用只覆盖自身对象的 USER_*。"""
     p = system_prompt()
     assert "./doc/ob_wiki" in p
-    assert "ob_wiki/README.md" in p
+    assert "search_docs" in p
+    assert "read_doc" in p
+    assert "index.md" in p
     assert "ALL_TAB_COLUMNS" in p
     assert "USER_TAB_COLUMNS" not in p
     assert "owner" in p
