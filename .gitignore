@@ -16,6 +16,7 @@ backend/data/real_*.json
 # 本地临时产物（不入库）
 .tmptest/
 pytest-cache-files-*/
+retrieval-eval.json
 
 # 参考工程（不并入本仓库；仅作 OCP 接口借鉴）
 llm_db/
