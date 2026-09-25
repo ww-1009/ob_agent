@@ -40,6 +40,7 @@ TOOL_STATUS: Dict[str, str] = {
     "get_full_sql_text": "正在从 OCP 拉取完整SQL文本…",
     "get_sql_explain": "正在从 OCP 拉取执行计划…",
     "get_sql_top_plan": "正在从 OCP 拉取SQL计划uid…",
+    "compare_plans": "正在对比两份执行计划…",
 
     "execute_sql": "正在执行只读 SQL 查询…",
     "get_table_ddl": "正在获取表结构信息…",

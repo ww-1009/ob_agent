@@ -38,3 +38,13 @@ def test_system_prompt_names_key_db_tools():
     for name in ("execute_sql", "get_table_ddl", "get_tenant_info",
                  "get_cluster_resource_stats", "get_server_resource_stats"):
         assert name in p
+
+
+def test_system_prompt_tells_model_to_compare_plans():
+    """同一 SQL 变慢时要比计划，而不是肉眼比对/直接倒树。"""
+    p = system_prompt()
+    assert "get_sql_top_plan" in p
+    assert "compare_plans" in p
+    assert "verdict" in p
+    assert "cost ratio" in p
+    assert "_before / *_after" in p

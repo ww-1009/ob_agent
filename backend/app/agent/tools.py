@@ -16,7 +16,7 @@ from typing import Sequence
 from langchain_core.tools import BaseTool, tool
 from langchain_community.agent_toolkits import FileManagementToolkit
 from app.agent.tool_input import SlowSqlInput, FullSqlTextInput, SqlTopPlanInput, ExecuteSqlInput, SqlExplainInput, \
-     TableDDLInput, ClusterIdInput, DocSearchInput, DocReadInput
+     TableDDLInput, ClusterIdInput, DocSearchInput, DocReadInput, PlanCompareInput
 from app.agent.doc_index import (
     DEFAULT_READ_CHARS,
     DEFAULT_LIMIT,
@@ -25,6 +25,8 @@ from app.agent.doc_index import (
     DocPathError,
     get_index,
 )
+from app.agent.plan_diff import diff_plan_views
+from app.agent.plan_view import build_plan_view
 from app.config import SqlConfig, load_settings
 from app.tools.base import OcpClient, OcpClientError, SqlExecutionError, SqlExecutor
 from app.tools.sql.guard import ReadOnlyViolation, assert_read_only
@@ -380,6 +382,43 @@ def build_tools(
         except Exception as e:
             return _error(e)
 
+    @tool(args_schema=PlanCompareInput)
+    def compare_plans(cluster_id: int, tenant_id: int, uid_before: str, uid_after: str,
+                      start_time: str, end_time: str, start_time_before: str = "",
+                      end_time_before: str = "", start_time_after: str = "",
+                      end_time_after: str = "") -> str:
+        """对比同一个 SQL 的两份执行计划（优化前后 / 回归检测），指出变贵或变便宜的算子、索引变化
+
+        典型用法：先 get_sql_top_plan 拿到两次计划各自的 uid，再传 uid_before（基准，改动前）
+        与 uid_after（目标，改动后）。判定「是不是变慢了」看 verdict 与 cost_ratio；
+        定位「慢在哪个算子」看 regressions（按**自身代价**增量排序，不含子节点的代价传播）；
+        「索引是不是没走」看 access_changes。加索引/改 SQL 之前也先用它留一份基准计划作对照。
+        """
+        try:
+            views = []
+            for uid, label, win_start, win_end in (
+                (uid_before, "基准计划", start_time_before or start_time, end_time_before or end_time),
+                (uid_after, "目标计划", start_time_after or start_time, end_time_after or end_time),
+            ):
+                data_list = ocp.get_sql_explain(cluster_id, tenant_id, uid, win_start, win_end)
+                if not data_list:
+                    return _fail(f"未获取到{label}（uid={uid} 可能已过期）", kind="not_found")
+                view = build_plan_view(data_list)
+                if view is None:
+                    return _fail(f"{label}的报文不成形，取不到执行计划树（uid={uid}）", kind="not_found")
+                # 夹具/线上报文的 uid 可能是 None：用请求参数兜底，报告中才能自报身份
+                view["uid"] = data_list.get("uid") or uid
+                view["sql_id"] = data_list.get("sqlId") or ""
+                views.append(view)
+            before_view, after_view = views
+            if before_view["uid"] == after_view["uid"]:
+                # 同一份计划自己比自己必然是 unchanged，与其给模型一个假结论不如直接说清
+                return _fail("两次对比传入了同一个 uid，请提供改动前后各自的计划 uid", kind="error")
+            diff = diff_plan_views(before_view, after_view)
+        except Exception as e:
+            return _error(e)
+        return _ok(**diff)
+
     @tool(args_schema=ExecuteSqlInput)
     def execute_sql(tenant_name: str, cluster_name: str, db_name: str, sql: str, tenant_type: str) -> str:
         """连接数据库执行查询操作"""
@@ -447,7 +486,8 @@ def build_tools(
         return _ok(**doc)
 
     return [get_tenant_info, get_cluster_list, get_cluster_resource_stats, get_server_resource_stats,
-            get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, execute_sql,get_table_ddl,
+            get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, compare_plans,
+            execute_sql,get_table_ddl,
             search_docs, read_doc]+file_tools
 
 if __name__ == '__main__':

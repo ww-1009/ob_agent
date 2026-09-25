@@ -32,6 +32,7 @@ _EXPECTED_TOOLS = {
     "get_full_sql_text",
     "get_sql_top_plan",
     "get_sql_explain",
+    "compare_plans",
     "execute_sql",
     "get_table_ddl",
     "search_docs",
@@ -385,3 +386,70 @@ def test_empty_plan_is_reported_as_failure():
         built["get_sql_explain"].invoke({"cluster_id": 1, "tenant_id": 1001, "uid": "u-1"})
     )
     assert explain["ok"] is False and explain["error_kind"] == "not_found"
+    compared = json.loads(
+        built["compare_plans"].invoke(
+            {"cluster_id": 1, "tenant_id": 1001, "uid_before": "u-1", "uid_after": "u-2"}
+        )
+    )
+    assert compared["ok"] is False and compared["error_kind"] == "not_found"
+
+
+def _two_plan_uids(tools) -> list[str]:
+    """按模型的实际用法取 uid：先 get_sql_top_plan，再拿 items 里的两个计划。"""
+    top = json.loads(
+        tools["get_sql_top_plan"].invoke({"cluster_id": 1, "tenant_id": 1001, "sql_id": "sq-1"})
+    )
+    assert top["ok"] is True
+    return [item["uid"] for item in top["items"]]
+
+
+def test_compare_plans_reports_regression_between_two_plans(tools):
+    before_uid, after_uid = _two_plan_uids(tools)
+    assert before_uid != after_uid
+    data = json.loads(
+        tools["compare_plans"].invoke(
+            {
+                "cluster_id": 1,
+                "tenant_id": 1001,
+                "uid_before": before_uid,
+                "uid_after": after_uid,
+            }
+        )
+    )
+    assert data["ok"] is True
+    assert data["verdict"] == "regressed" and data["changed"] is True
+    assert data["before"]["uid"] == before_uid and data["after"]["uid"] == after_uid
+    # 全表扫描：代价涨两个数量级，回归点落在丢了索引的那张表上
+    assert data["cost_ratio"] > 90
+    assert data["regressions"] and data["regressions"][0]["name"].startswith("WRT(")
+    notes = " ".join(data["highlights"])
+    assert "全表扫描" in notes or any("全表扫描" in n for c in data["access_changes"] for n in c["notes"])
+    assert data["counts"]["added"] == 0 and data["counts"]["removed"] == 0
+
+
+def test_compare_plans_rejects_identical_uids(tools):
+    uid = _two_plan_uids(tools)[0]
+    data = json.loads(
+        tools["compare_plans"].invoke(
+            {"cluster_id": 1, "tenant_id": 1001, "uid_before": uid, "uid_after": uid}
+        )
+    )
+    # 自己比自己必然是 unchanged，给模型一个假结论不如直接报错让它换 uid
+    assert data["ok"] is False and "同一个 uid" in data["error"]
+
+
+def test_compare_plans_treats_the_earlier_plan_as_baseline(tools):
+    """两个 uid 的先后顺序决定 verdict 方向：反过来比应报 improved。"""
+    before_uid, after_uid = _two_plan_uids(tools)
+    data = json.loads(
+        tools["compare_plans"].invoke(
+            {
+                "cluster_id": 1,
+                "tenant_id": 1001,
+                "uid_before": after_uid,
+                "uid_after": before_uid,
+            }
+        )
+    )
+    assert data["verdict"] == "improved"
+    assert data["improved"] and data["improved"][0]["self_cost_after"] < data["improved"][0]["self_cost_before"]

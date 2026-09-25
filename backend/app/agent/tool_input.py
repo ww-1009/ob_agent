@@ -95,6 +95,32 @@ class SqlExplainInput(BaseModel):
     end_time: str = Field(description=_END_DESC, default_factory=_now_iso)
 
 
+class PlanCompareInput(BaseModel):
+    cluster_id: int = Field(description="集群的 ID")
+    tenant_id: int = Field(description="租户的 ID")
+    uid_before: str = Field(
+        description="基准计划的 uid（改动前/上一次的那份，由 get_sql_top_plan 的 items 里取）"
+    )
+    uid_after: str = Field(
+        description="目标计划的 uid（改动后/本次的那份，由 get_sql_top_plan 的 items 里取）"
+    )
+    start_time: str = Field(description=_START_DESC, default_factory=_window_start_iso)
+    end_time: str = Field(description=_END_DESC, default_factory=_now_iso)
+    start_time_before: Optional[str] = Field(
+        description="基准计划的起始时间；两份计划采集时间不同时才需要单独指定，不传则用 start_time",
+        default=None,
+    )
+    end_time_before: Optional[str] = Field(
+        description="基准计划的结束时间；不传则用 end_time", default=None
+    )
+    start_time_after: Optional[str] = Field(
+        description="目标计划的起始时间；不传则用 start_time", default=None
+    )
+    end_time_after: Optional[str] = Field(
+        description="目标计划的结束时间；不传则用 end_time", default=None
+    )
+
+
 class TableDDLInput(BaseModel):
     cluster_name: str = Field(description="集群名")
     tenant_name: str = Field(description="租户名")

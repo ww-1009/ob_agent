@@ -10,6 +10,15 @@ _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data
 # OCP filter_expression 形如 "@avgElapsedTime > 300 and @executions > 100"；mock 仅实现首个条件
 _FILTER_EXPR = re.compile(r"@([A-Za-z]+)\s*(>=|<=|>|<)\s*([0-9.]+)")
 
+# 计划 uid → 夹具：ocp_top_plan.json 里的两条记录分别对应「改动前的走索引计划」与
+# 「回归后的全表扫描计划」，compare_plans 靠这张表拿到两份可对比的计划。
+# 未收录的 uid 一律回落到默认计划：老行为（任意 uid 都能取到一份计划）不能破。
+_EXPLAIN_BY_UID = {
+    "VU5JT05IQVNIVUlELTQtNTAzMzEyLTQwRDIzRTY2QUIzMDE1Mzc2NjU3M0FCNDc1MURDMzNCLTZjNzQ0NjQ0ODQyNmE1ODM5MGE2ZDYwNjI2NDU5Zjgz": "ocp_sql_explain.json",
+    "VU5JT05IQVNIVUlELTQtNTAzMzEyLTQwRDIzRTY2QUIzMDE1Mzc2NjU3M0FCNDc1MURDMzNCLWExYjJjM2Q0ZTVmNjA3MTgyOTNhNGI1YzZkN2U4Zjkw": "ocp_sql_explain_after.json",
+}
+_DEFAULT_EXPLAIN_FIXTURE = "ocp_sql_explain.json"
+
 
 class MockOcpClient:
     def __init__(self, data_dir: Path | None = None) -> None:
@@ -74,7 +83,8 @@ class MockOcpClient:
         return self._read("ocp_top_plan.json")
 
     def get_sql_explain(self, cluster_id, tenant_id, uid, start_time, end_time):
-        return self._read("ocp_sql_explain.json")
+        # uid 决定返回哪一份计划：compare_plans 要靠它区分「改动前 / 改动后」两份计划
+        return self._read(_EXPLAIN_BY_UID.get(str(uid or ""), _DEFAULT_EXPLAIN_FIXTURE))
 
     def _cluster_ids(self) -> set[str]:
         return {str(c.get("id")) for c in self._read("ocp_clusters.json")}

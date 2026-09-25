@@ -65,4 +65,10 @@ def system_prompt(now: datetime | None = None) -> str:
         "levels before blaming the SQL: call get_cluster_resource_stats for the whole cluster and "
         "get_server_resource_stats for each OBServer, and check whether CPU/memory/disk are near "
         "saturation (the *_Pct fields) or whether usage is skewed onto one node.\n"
+        "13. When the same SQL suddenly got slower, do not eyeball two plans: call "
+        "get_sql_top_plan (the top plans of one SQL, newest first) to get the uid of a good and a "
+        "bad plan, then call compare_plans with both uids. Report its verdict, the cost ratio and "
+        "the regressed operators (lost index, row-estimate jump, full scan) instead of dumping the "
+        "raw plan trees; pass the *_before / *_after time overrides only when the two plans were "
+        "collected in different windows.\n"
     )

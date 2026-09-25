@@ -13,6 +13,7 @@ TOOL_LABEL: dict[str, str] = {
     "get_full_sql_text": "拉取完整SQL文本",
     "get_sql_top_plan": "拉取SQL计划uid",
     "get_sql_explain": "拉取执行计划结构",
+    "compare_plans": "对比执行计划",
     "execute_sql": "执行只读 SQL",
     "get_table_ddl": "获取表结构",
     "search_docs": "检索官方文档",
