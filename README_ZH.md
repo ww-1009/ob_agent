@@ -63,8 +63,10 @@ ob_agent/
 │   │   │   ├── model.py      # 构建 ChatOpenAI
 │   │   │   ├── prompt.py     # System Prompt（DBA 助手 + 规则）
 │   │   │   ├── confirm.py    # HITL 人工确认通道（ConfirmationBroker + 中间件）
-│   │   │   ├── tools.py      # 10 个 DBA 工具 + search_docs/read_doc + 2 个只读文档文件工具（共注册 14 个）
+│   │   │   ├── tools.py      # 11 个 DBA 工具 + search_docs/read_doc + 2 个只读文档文件工具（共注册 15 个）
 │   │   │   ├── doc_index.py  # ob_wiki FTS5 索引：建库 / 检索 / 按小节读取
+│   │   │   ├── plan_view.py  # 把 OCP 计划报文归一化成先序、带 depth 的算子视图
+│   │   │   ├── plan_diff.py  # 两份计划视图对比：结论 / 代价倍数 / 回归算子
 │   │   │   └── tool_input.py # 工具入参 Pydantic 模型
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat（SSE）· GET /api/health
@@ -83,6 +85,8 @@ ob_agent/
 │   ├── config.yaml           # 实际配置（已 gitignore，不再被 git 跟踪）
 │   ├── .env.example          # 示例环境变量（入库）
 │   └── .env                  # 实际环境变量（已 gitignore，不再被 git 跟踪）
+│   ├── scripts/              # unpack_doc.py：就地解压文档语料（修复文件名编码）
+│   ├── eval/                 # 检索评测集 + run_eval.py（CI 质量门禁）
 │   ├── doc/                  # ob_wiki.zip（入库）+ ob_wiki/（就地解压的官方文档，gitignore）
 │   └── data/                 # mock fixtures（已入库；real_*.json 被 gitignore）
 ├── frontend/                 # Vue 3 + Vite 前端
@@ -91,6 +95,7 @@ ob_agent/
 │   ├── index.html · vite.config.js · package.json
 │   └── dist/                 # npm run build 产物
 ├── tests/                    # 后端 pytest（仓库根，pytest.ini testpaths=tests）
+├── .github/workflows/ci.yml  # CI：后端 pytest + 检索门禁 + 前端 vitest
 └── README.md
 ```
 
@@ -156,11 +161,12 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
 | `ocp_cluster_stats.json`、`ocp_server_stats.json` | `get_cluster_resource_stats`、`get_server_resource_stats` |
 | `ocp_slow_sqls.json`（首条 `sqlId` 为 `sq-scan-orders-1`） | `get_slow_sql` |
 | `ocp_sql_text.json`、`ocp_top_plan.json`、`ocp_sql_explain.json` | `get_full_sql_text`、`get_sql_top_plan`、`get_sql_explain` |
+| `ocp_sql_explain_after.json` + `ocp_top_plan.json` 的第二条 | `compare_plans`（同一 SQL 丢掉索引后的计划，回归用例） |
 | `sample_tables.json` | `execute_sql`，以及 `get_table_ddl` 背后合成的 `SHOW CREATE TABLE` |
 | `slow_sqls.json` | `execute_sql` 背后 mock 的 `oceanbase.gv$sql_audit` 路径 |
 | `explain_results.json` | mock 的 `EXPLAIN` 匹配表 |
 
-当 `ocp.provider: mock` **且** `sql_ro.provider: mock` 时，10 个 DBA 工具全部改由这些夹具作答，因此在既连不上 OCP、也连不上数据库的环境下演示仍可跑通。`real_*.json` 用于存放抓取的真实响应，仍被 gitignore。
+当 `ocp.provider: mock` **且** `sql_ro.provider: mock` 时，11 个 DBA 工具全部改由这些夹具作答，因此在既连不上 OCP、也连不上数据库的环境下演示仍可跑通。`real_*.json` 用于存放抓取的真实响应，仍被 gitignore。
 
 ### 前端
 
@@ -173,6 +179,27 @@ npm run dev        # http://127.0.0.1:5173（/api 已 proxy → 127.0.0.1:8000�
 先按上文起好后端（mock 默认），再开前端。页面输入“有哪些慢SQL？”的行为分两种：未配置 LLM 时走
 **503 错误分支**（顶部提示“LLM 未配置”）；接入真实或桩 LLM 后，同一输入才可见
 `status` 灰字 → markdown 流式 → `done` 的演示闭环。
+
+### 测试与 CI
+
+```bash
+# 后端测试 —— 必须在仓库根跑（pytest.ini 里 testpaths=tests、pythonpath=backend tests）
+backend/.venv/bin/python -m pytest -q
+
+# 文档检索评测门禁 —— 真语料、真数字（详见 backend/eval/README.md）
+python backend/scripts/unpack_doc.py        # 语义料只解压一次（幂等；评测依赖它）
+python backend/eval/run_eval.py --strict    # 退出码 0 通过 / 2 低于阈值 / 3 用例过期或语料缺失
+
+# 前端测试
+cd frontend && npm test
+```
+
+文档工具的测试分两层：`tests/test_doc_index.py` 跑小型合成语料（快、只验机制），
+`tests/test_retrieval_eval.py` 用 50 条真实提问打 5146 篇真语料，按命中率@5 与 MRR 做门禁
+（语料不存在时自动跳过）。真语料基线：**命中率@1 60%、命中率@5 82%、命中率@10 94%、MRR@10 0.704**，
+单次查询约 114 ms；低于命中率@5 80% / MRR 0.68 门禁即失败，所以调排序常数不会再悄悄弄差检索。
+`.github/workflows/ci.yml` 按「后端 pytest → 检索门禁 → 前端 vitest」顺序执行（`main` / `feature-dev`
+推送与 PR 触发），并把完整评测报告作为 artifact 上传。
 
 ---
 
@@ -493,4 +520,6 @@ curl -N -X POST https://your-domain.example.com/api/chat \
 - **LLM**：配置完成后，mock/演示提示改为按 provider 注入（当前 prompt 已不再内嵌 mock 提示）。
 - **资源水位**：已实现 —— 新增 `get_cluster_list`、`get_cluster_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/stats`，返回扁平 `ClusterResourceStats`）与 `get_server_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/serverStats`，返回 `data.contents` 列表）。工具层按白名单裁剪字段并补出 `cpuAssignedPct` / `memoryAssignedPct` / `dataDiskUsedPct` / `logDiskUsedPct` 水位百分比；取不到数据时按 `not_found` 返回 `ok:false`，避免把「无数据」误读成「零水位」。待联调确认：真实报文字段名与文档一致（CPU 为核数，内存/磁盘为 Byte），以及是否需要传采样时间窗。
 - **文档检索**：已实现 —— `search_docs` / `read_doc` 取代「逐级猜目录名、再整篇读文件」（`backend/app/agent/doc_index.py`）。语料做了中文预分词（CJK 单字 + 双字）后建 FTS5 external-content 索引（`tokenize='unicode61'`），所以「事务」「索引」「锁」这类双字查询能命中（SQLite `trigram` 分词器做不到）。检索直接返回命中的**小节** + 可读摘要 + `score`；提问里写的模式（MySQL/Oracle）和版本号会自动识别为过滤条件（否则同名文档无法区分）；中文疑问词/虚词（`哪些` / `如何` / `一共` / `包含` …）会从检索词里剔除，所以「错误码一共有哪些」不再被满篇「哪些」的 FAQ 顶到前排；导航型文件（`index.md` 与根 `README.md`）归为 `nav` 并重降权（`NAVIGATION_FILE_PENALTY`）而不是硬排除——它们只指路，答案以正文为准——只有问「有哪些分类 / 文档库怎么组织」时用 `include_index=true` 取消该惩罚；正文里的导航型小节（`相关文档` / `参见` / `更多信息`）同样降权，`read_doc` 再按小节精读并返回 `sections` 目录。真实语料实测：5146 篇 → 25077 个分块、索引 67.7 MB、重建约 5 秒、单次查询约 70–130 ms（耗时主要在 OR 扩展召回这一路）。
+- **执行计划对比 / 回归检测**：已实现 —— `compare_plans`（`backend/app/agent/plan_diff.py`）回答「同一条 SQL 突然变慢，为什么」。它重建两棵计划树，把 OCP 的**累计代价**换算成算子自身代价（这样真正该负责的是变化的那片叶子，而不是继承增量的每个祖先），同层按 `(operator, name)` 做 LCS 对齐，输出结论（`unchanged` / `changed` / `regressed` / `improved`）、代价倍数、回归与改善的算子、新增/删除算子、以及属性级说明（可用索引消失、`physical_range_rows` 暴涨、回表、输出行数）；返回的树会裁掉无关分支。mock 回归夹具（丢索引 → 全表扫描）上输出：结论 `regressed`、代价倍数 95.2、总代价 1958 → 186416、行数 1 → 971070，并定位到 `PHY_TABLE_SCAN(WRT(WARN_RULE_TOTAL_INDEX_N1))`。
+- **检索评测 + CI**：已实现 —— `backend/eval/` 存放 50 条真实 DBA 提问与期望文档（`retrieval_cases.jsonl`）和 `run_eval.py`，输出命中率@1/@5/@10、MRR、延迟与按 tag 的分组，低于命中率@5 80% 或 MRR 0.68 即非零退出（基线 60% / 82% / 94%，MRR 0.704）。`tests/test_retrieval_eval.py` 在 pytest 里跑同一套门禁，并额外守两条不变量：每个期望路径必须仍存在于语料（语料升级后评测集过期会直接报错）、导航页永远不得抢走正文答案的第一名。`.github/workflows/ci.yml` 依次跑后端 pytest、该门禁与前端 vitest；`backend/scripts/unpack_doc.py` 负责在 CI 里解压语料（修复压缩包的非 UTF-8 文件名，并把 mtime 钉在压缩包记录上，使索引指纹与机器无关）。
 - **Oracle 租户**：已实现 —— `execute_sql` / `get_table_ddl` 现已把 Oracle 模式租户路由到 OCI 驱动（`backend/app/tools/sql/oracle.py`）。DSN 的 service name 直接取工具的 `db_name` 参数（即该租户的 SERVICE_NAME），不再从配置读取；只读账号无 `@` 时补成 `user@tenant#cluster`。`get_table_ddl` 以 `db_name` 作 DDL 的 owner，回退 SQL 为 `all_tab_columns where owner = <db_name>`。`connect_timeout` / `query_timeout_seconds` 只传给支持它们的驱动（`oracledb` 瘦模式两者都支持；`cx_Oracle` 无 `tcp_connect_timeout`（跳过），`call_timeout` 仅在版本支持时设置，跳过时记 debug 日志）。待联调确认：该租户的 SERVICE_NAME 是否与你传入的 `db_name` 一致（不一致会报 ORA-12514/12505）、以及是否开放 `DBMS_METADATA.GET_DDL`。注意 `cx_Oracle` 无 Python ≥ 3.11 轮子，故 `driver` 默认 `oracledb`（瘦模式，无需 Oracle 客户端库）。

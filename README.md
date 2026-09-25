@@ -62,8 +62,10 @@ ob_agent/
 │   │   │   ├── model.py      # Build ChatOpenAI
 │   │   │   ├── prompt.py     # System Prompt (DBA Assistant + Rules)
 │   │   │   ├── confirm.py    # HITL Human-in-the-loop confirmation channel (ConfirmationBroker + Middleware)
-│   │   │   ├── tools.py      # 10 DBA tools + search_docs/read_doc + 2 doc file tools (14 registered)
+│   │   │   ├── tools.py      # 11 DBA tools + search_docs/read_doc + 2 doc file tools (15 registered)
 │   │   │   ├── doc_index.py  # ob_wiki FTS5 index: build / search / read-by-section
+│   │   │   ├── plan_view.py  # Normalize an OCP plan payload into a pre-order operator view
+│   │   │   ├── plan_diff.py  # Diff two plan views: verdict / cost ratio / regressed operators
 │   │   │   └── tool_input.py # Tool input Pydantic models
 │   │   ├── api/
 │   │   │   ├── chat.py       # POST /api/chat (SSE) · GET /api/health
@@ -82,6 +84,8 @@ ob_agent/
 │   ├── config.yaml           # Actual config (Gitignored, not tracked)
 │   ├── .env.example          # Example env vars (Tracked in Git)
 │   └── .env                  # Actual env vars (Gitignored, not tracked)
+│   ├── scripts/              # unpack_doc.py: unzip the doc corpus in place (fixes filename encoding)
+│   ├── eval/                 # Retrieval eval set + run_eval.py (CI quality gate)
 │   ├── doc/                  # ob_wiki.zip (tracked) + ob_wiki/ (docs unzipped in place, gitignored)
 │   └── data/                 # mock fixtures (Tracked; real_*.json is gitignored)
 ├── frontend/                 # Vue 3 + Vite frontend
@@ -90,6 +94,7 @@ ob_agent/
 │   ├── index.html · vite.config.js · package.json
 │   └── dist/                 # npm run build output
 ├── tests/                    # Backend pytest (Repository root, pytest.ini testpaths=tests)
+├── .github/workflows/ci.yml  # CI: backend pytest + retrieval eval gate + frontend vitest
 └── README.md
 ```
 
@@ -152,11 +157,12 @@ curl -N -X POST http://127.0.0.1:8000/api/chat \
 | `ocp_cluster_stats.json`, `ocp_server_stats.json` | `get_cluster_resource_stats`, `get_server_resource_stats` |
 | `ocp_slow_sqls.json` (first `sqlId` is `sq-scan-orders-1`) | `get_slow_sql` |
 | `ocp_sql_text.json`, `ocp_top_plan.json`, `ocp_sql_explain.json` | `get_full_sql_text`, `get_sql_top_plan`, `get_sql_explain` |
+| `ocp_sql_explain_after.json` + the second entry of `ocp_top_plan.json` | `compare_plans` (the same SQL after its index was lost: a regression fixture) |
 | `sample_tables.json` | `execute_sql`, plus the synthesized `SHOW CREATE TABLE` behind `get_table_ddl` |
 | `slow_sqls.json` | the mock `oceanbase.gv$sql_audit` path behind `execute_sql` |
 | `explain_results.json` | the mock `EXPLAIN` lookup |
 
-With `ocp.provider: mock` **and** `sql_ro.provider: mock`, all ten DBA tools answer from these fixtures, so the demo runs with neither OCP nor a database reachable. `real_*.json` files are for captured real responses and stay gitignored.
+With `ocp.provider: mock` **and** `sql_ro.provider: mock`, all eleven DBA tools answer from these fixtures, so the demo runs with neither OCP nor a database reachable. `real_*.json` files are for captured real responses and stay gitignored.
 
 ### Frontend
 
@@ -167,6 +173,22 @@ npm run dev        # http://127.0.0.1:5173 (/api is proxied → 127.0.0.1:8000)
 ```
 
 Start the backend first as described above (defaults to mock mode), then start the frontend. Entering "有哪些慢SQL？" on the webpage exhibits two behaviors: when LLM is unconfigured, it follows the **503 error branch** (displaying "LLM not configured" at the top); after connecting a real or stub LLM, entering the same prompt demonstrates the complete demo loop: `status` grey text → markdown streaming → `done`.
+
+### Tests and CI
+
+```bash
+# Backend tests — run from the repository ROOT (pytest.ini sets testpaths=tests, pythonpath=backend tests)
+backend/.venv/bin/python -m pytest -q
+
+# Document retrieval eval gate — real corpus, real numbers (see backend/eval/README.md)
+python backend/scripts/unpack_doc.py        # unpack the corpus once (idempotent; needed by the eval)
+python backend/eval/run_eval.py --strict    # exit 0 pass / 2 below threshold / 3 stale eval set
+
+# Frontend tests
+cd frontend && npm test
+```
+
+Document tool tests fall into two layers: `tests/test_doc_index.py` drives a small synthetic corpus (fast, mechanism-level), while `tests/test_retrieval_eval.py` runs 50 real questions against the unpacked 5146-document corpus and gates on recall@5 and MRR — it skips itself when the corpus is absent. Baseline on the real corpus: **recall@1 60%, recall@5 82%, recall@10 94%, MRR@10 0.704**, ~114 ms per query; the gate fails below recall@5 80% / MRR 0.68, so a ranking tweak cannot silently degrade retrieval. `.github/workflows/ci.yml` runs exactly these steps (backend pytest → eval gate → frontend vitest) on pushes to `main` / `feature-dev` and on pull requests, uploading the full eval report as an artifact.
 
 ---
 
@@ -473,4 +495,6 @@ Open the site in a browser, and you should see the empty state page "Hello, I am
 - **LLM**: After configuration, inject mock/demo hints per provider (the prompt no longer embeds mock hints).
 - **Resource water level**: Implemented — added `get_cluster_list`, `get_cluster_resource_stats` (`GET /api/v2/ob/clusters/{id}/stats`, a flat `ClusterResourceStats` object) and `get_server_resource_stats` (`GET /api/v2/ob/clusters/{id}/serverStats`, a `data.contents` list). The tool layer whitelists the fields and derives the `cpuAssignedPct` / `memoryAssignedPct` / `dataDiskUsedPct` / `logDiskUsedPct` water levels; when nothing is returned it reports `ok:false` with `error_kind: not_found`, so "no data" is never read as "zero usage". Remaining live-test item: real payload field names match the docs (CPU in cores, memory/disk in bytes) and whether a sampling time window must be passed.
 - **Document retrieval**: Implemented — `search_docs` / `read_doc` replace "guess directory names, then read whole files" (`backend/app/agent/doc_index.py`). The corpus is pre-tokenized for Chinese (CJK unigram + bigram) into an FTS5 external-content index (`tokenize='unicode61'`), so 2-character queries (`事务`, `索引`, `锁`) match; `trigram` cannot. Search returns the matching *section* with a readable snippet and a `score`; the MySQL/Oracle mode and the version written in the question are auto-detected and used as filters (the same-named MySQL/Oracle documents are otherwise indistinguishable); Chinese question words / fillers (`哪些` / `如何` / `一共` / `包含` …) are dropped from the query terms, so "错误码一共有哪些" no longer surfaces FAQ pages that merely say 哪些 a lot; navigation files (`index.md` and the root `README.md`) are classified as `nav` and heavily down-weighted (`NAVIGATION_FILE_PENALTY`) instead of excluded — they only point at documents, and the body text is authoritative — while `include_index=true` lifts the penalty for genuine "what categories are there / how is the doc set organised" questions; in-document navigation sections (`相关文档` / `参见` / `更多信息`) are down-weighted too. `read_doc` then returns just the requested section plus a `sections` TOC. Measured on the real corpus: 5146 docs → 25077 chunks, 67.7 MB index, ~5 s rebuild, ~70–130 ms per query (the OR-expanded round dominates).
+- **Plan regression detection**: Implemented — `compare_plans` (`backend/app/agent/plan_diff.py`) answers "the same SQL suddenly got slower, why?". It rebuilds both plan trees, converts OCP's *cumulative* cost into per-operator self cost (so the true culprit is the leaf that changed, not every ancestor that inherits the increase), aligns siblings by `(operator, name)` with an LCS, and reports a verdict (`unchanged` / `changed` / `regressed` / `improved`), the cost ratio, the regressed and improved operators, added/removed operators, and property-level notes (available index lost, `physical_range_rows` jump, index-back, output rows). Unrelated branches are pruned from the returned tree. On the mock regression fixture (index lost → full scan) it reports `regressed`, cost ratio 95.2, cost 1958 → 186416 and rows 1 → 971070, pointing at `PHY_TABLE_SCAN(WRT(WARN_RULE_TOTAL_INDEX_N1))`.
+- **Retrieval eval + CI**: Implemented — `backend/eval/` holds 50 real DBA questions with expected documents (`retrieval_cases.jsonl`) and `run_eval.py`, which reports recall@1/@5/@10, MRR, latency and per-tag breakdown, and exits non-zero when recall@5 < 80% or MRR < 0.68 (baseline: 60% / 82% / 94%, MRR 0.704). `tests/test_retrieval_eval.py` runs the same gate inside pytest plus two invariants: every expected path must still exist in the corpus (a stale eval set fails loudly after a corpus upgrade), and navigation pages must never take the top slot from a body document. `.github/workflows/ci.yml` runs backend pytest, this gate, and frontend vitest; `backend/scripts/unpack_doc.py` unpacks the corpus in CI (it repairs the archive's non-UTF-8 filenames and pins mtimes to the archive so the index fingerprint is machine-independent).
 - **Oracle Tenant**: Implemented — `execute_sql` / `get_table_ddl` now route Oracle-mode tenants to the OCI driver (`backend/app/tools/sql/oracle.py`). The DSN service name comes from the `db_name` argument of the tool (the tenant's SERVICE_NAME), not from configuration; the read-only account is completed to `user@tenant#cluster` when it carries no `@`. `get_table_ddl` passes `db_name` as the DDL owner and falls back to `all_tab_columns where owner = <db_name>`. `connect_timeout` / `query_timeout_seconds` are only passed to drivers that support them: `oracledb` thin mode takes both, `cx_Oracle` has no `tcp_connect_timeout` (skipped) and `call_timeout` is applied only when the version allows it, with the skip logged at debug level. Remaining live-test item: whether the tenant's SERVICE_NAME equals the `db_name` you pass (a mismatch surfaces as ORA-12514/12505), and whether `DBMS_METADATA.GET_DDL` is available. Note `cx_Oracle` has no wheel for Python ≥ 3.11, so the default `driver` is `oracledb` (thin mode, no Oracle client libraries needed).
