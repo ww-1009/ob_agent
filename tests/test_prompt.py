@@ -24,6 +24,9 @@ def test_system_prompt_points_at_doc_dir_and_all_views():
     assert "search_docs" in p
     assert "read_doc" in p
     assert "index.md" in p
+    # 导航页/README 是降权而不是禁用：清单类提问要用 include_index 打开
+    assert "README.md" in p
+    assert "include_index" in p
     assert "ALL_TAB_COLUMNS" in p
     assert "USER_TAB_COLUMNS" not in p
     assert "owner" in p

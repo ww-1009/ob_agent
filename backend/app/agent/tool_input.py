@@ -123,7 +123,8 @@ class DocSearchInput(BaseModel):
         default=None
     )
     include_index: Optional[bool] = Field(
-        description="是否把导航索引页也纳入结果（默认否：索引页只指路，答案以正文为准）",
+        description="问「有哪些 / 包含哪些 / 怎么分类」这类要清单的问题时置 true，让分类索引页与"
+                    "知识库检索指南（README）正常参与检索；回答仍以正文为准",
         default=False
     )
 

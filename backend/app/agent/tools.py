@@ -409,7 +409,11 @@ def build_tools(
     @tool(args_schema=DocSearchInput)
     def search_docs(query: str, limit: int = DEFAULT_LIMIT, mode: str = "",
                     version: str = "", include_index: bool = False) -> str:
-        """检索 OceanBase 官方文档，返回相关小节（优先用它定位，再用 read_doc 精读该小节）"""
+        """检索 OceanBase 官方文档，返回相关小节（优先用它定位，再用 read_doc 精读该小节）
+
+        问「有哪些 / 包含哪些 / 怎么分类」这类要清单的问题时把 include_index 置 true，
+        分类索引页与知识库检索指南（README）会正常参与；其余情况保持默认，答案以正文为准。
+        """
         try:
             hits = get_index().search(
                 query, limit=limit or DEFAULT_LIMIT, mode=mode or "",
