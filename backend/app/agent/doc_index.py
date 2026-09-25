@@ -36,7 +36,7 @@ DEFAULT_DOC_ROOT = Path("./doc")
 WIKI_DIRNAME = "ob_wiki"
 INDEX_FILENAME = "ob_wiki.index.db"
 # 索引结构版本：分块/字段口径变了就 +1，旧索引会被判为过期并自动重建
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # 版本命中奖励：提问带了版本号时，标注该版本的小节优先（见 _entry）
 VERSION_MATCH_BONUS = 8.0
 # 全词命中奖励：一次召回同时命中提问里所有 token 的小节，优先于只命中部分词的小节
@@ -46,6 +46,12 @@ SYNONYM_PENALTY = 10.0
 # 导航型小节惩罚：正文里的「相关文档 / 参见 / 更多信息」和 index.md 一样只指路不讲答案，
 # 而且往往又短又抄满邻居标题，bm25 天然占优（实测真语料里「慢SQL 诊断」第一篇就是它）。
 NAVIGATION_SECTION_PENALTY = 12.0
+# 导航型文件惩罚：index.md（分类索引）和根 README.md（知识库检索指南）都只指路不讲答案。
+# 但不能像正文那样硬排除 —— 实测「OceanBase 数据库包含哪些分类」过滤疑问词后 README.md 排 #1，
+# 它就是该问题的最佳答案。所以默认参与检索但重降权，include_index=True 时才按正常排序。
+# 取 40 而不是 12：导航页又短又堆满关键词，bm25 动辄 90 分以上（实测「Oracle 模式的事务隔离级别」
+# 里上级 index.md 原始分 91.18，扣 12 后仍排第 3，会插进正文之间）。
+NAVIGATION_FILE_PENALTY = 40.0
 
 # 单个小节块的最大字符数：超长文档按空行再切，避免一个块覆盖整篇
 MAX_CHUNK_CHARS = 1800
@@ -68,6 +74,22 @@ _VERSION = re.compile(r"[Vv](\d+\.\d+(?:\.\d+)*)")
 # 只指路不讲答案的小节名（按「父 > 子」里的最后一段判断，见 _is_navigation_section）
 _NAV_SECTION = re.compile(r"相关(文档|阅读|链接|内容|问题)|参考(文档|资料|信息)|更多(信息|内容)|参见|延伸阅读|附录")
 _MIN_CHUNK_SPLIT = 200
+# 导航型文件：分类索引 + 知识库检索指南，按文件名判定（实测按链接密度判定会误伤正文：
+# 根 README.md 密度仅 0.08 却是说明文，而 V4.2.5 文档更新记录.md 这类真正文密度高达 0.88）。
+_NAV_FILENAMES = frozenset({"index.md", "readme.md"})
+# 中文疑问词与高频虚词，查询侧直接丢掉：清单类提问（「错误码一共有哪些」「系统变量有哪些」）
+# 的字面会被 FAQ 类文档里的「哪些/有哪/共有」大量命中，bm25 反而把 FAQ 顶到前三、答案文档
+# 一个不进（实测真语料，见 tests/test_doc_index.py 的清单提问用例）。
+# 注意：实测「只惩罚单字 token」无效 —— 噪声出在双字上，必须在切分阶段去掉。
+_STOPWORDS = frozenset({
+    "哪些", "什么", "怎么", "如何", "是否", "一共", "共有", "包含", "包括", "有哪",
+    "介绍", "说明", "请问", "可以", "需要", "为什", "多少", "几个", "哪几", "这个",
+    "那个", "以及", "或者", "还是", "有没", "没有", "告诉", "帮我", "一下",
+    "的", "了", "吗", "呢", "有", "是", "和", "与", "在", "里", "中", "都",
+    # 单字形态也要收：中文切分是「双字 + 单字」都出，只收双字的话 FAQ 仍会被 哪/些/一/共 命中
+    "哪", "些", "什", "么", "一", "共", "几", "多", "少", "我", "你", "请", "帮",
+    "告", "诉", "能", "会", "要", "可", "以",
+})
 # 导入残留：文件名统一后缀 -OceanBase；keywords 里混入站点标签
 _FILENAME_SUFFIX = "-OceanBase"
 _KEYWORD_NOISE = frozenset({"OB Cloud 云数据库", "OB Cloud", "OceanBase", "OceanBase 数据库"})
@@ -146,8 +168,12 @@ def _query_tokens(query: str) -> list[str]:
     单个 ASCII 字符/数字（``V4.2.5`` 里的 ``2``、``5``）区分度极低，会把 AND 收紧到 0 命中，
     直接丢掉；单个汉字保留 —— 它是有意义的词（``慢SQL`` 的 ``慢``、``锁``），而且长中文串的
     字符已经被双字 token 覆盖，多留一个单字不会明显收紧召回。
+
+    再去掉 :data:`_STOPWORDS` 里的疑问词/虚词（全部被去掉时退回未过滤结果，避免空查询）。
     """
-    return [t for t in _cjk_tokens(query).split() if len(t) >= 2 or _is_cjk(t)]
+    tokens = [t for t in _cjk_tokens(query).split() if len(t) >= 2 or _is_cjk(t)]
+    kept = [t for t in tokens if t not in _STOPWORDS]
+    return kept or tokens
 
 
 def _clean_title(name: str) -> str:
@@ -388,7 +414,7 @@ class DocIndex:
                 )
                 keywords = _clean_keywords(meta.get("keywords", ""))
                 mode = _detect_mode(rel)
-                kind = "index" if path.name == "index.md" else "doc"
+                kind = "nav" if path.name.lower() in _NAV_FILENAMES else "doc"
                 for section, chunk in _split_chunks(body):
                     rows.append(
                         (next_id, rel, kind, mode, _detect_version(section, rel), disp_title,
@@ -431,6 +457,11 @@ class DocIndex:
         version: str = "",
         include_index: bool = False,
     ) -> list[dict[str, Any]]:
+        """检索文档小节。
+
+        ``include_index=True`` 让导航页（``index.md`` / ``README.md``）按正常排序参与，适合
+        「有哪些 / 包含哪些 / 怎么分类」这类要清单的提问；默认只把它们放在重降权的位置。
+        """
         tokens = _query_tokens(query)
         if not tokens:
             raise DocIndexError("query 不能为空")
@@ -466,14 +497,21 @@ class DocIndex:
         的标题整句抄了下来，却没讲答案，一旦早退就会把真正讲该问题的小节挤出结果（实测
         「MySQL 模式的事务隔离级别」丢掉了正文，只剩链接清单）。
         """
-        def fetch(groups, n):
-            return self._match(
-                groups, limit=n, mode=mode, version=version, include_index=include_index
-            )
+        doc_kinds: tuple[str, ...] = ("doc", "nav") if include_index else ("doc",)
+
+        def fetch(groups, n, kinds=doc_kinds):
+            return self._match(groups, limit=n, mode=mode, version=version, kinds=kinds)
 
         rows: list[tuple[sqlite3.Row, float]] = [(r, AND_ALL_TERMS_BONUS) for r in fetch([tokens], limit * 2)]
         rows += [(r, 0.0) for r in fetch([[t] for t in tokens], limit * 3)]
-        rows += [(r, -SYNONYM_PENALTY) for r in self._match_expanded(query, limit, mode, version, include_index)]
+        rows += [(r, -SYNONYM_PENALTY) for r in self._match_expanded(query, limit, mode, version, doc_kinds)]
+        if not include_index:
+            # 导航页（index.md / README.md）单独一路、重降权召回：既不能硬排除（「OceanBase
+            # 数据库包含哪些分类」的最佳答案就是根 README.md），也不能不降权（bm25 会让它挤掉正文）。
+            rows += [
+                (r, -NAVIGATION_FILE_PENALTY)
+                for r in fetch([[t] for t in tokens], limit, ("nav",))
+            ]
 
         best: dict[tuple[str, str], dict[str, Any]] = {}
         for row, bonus in rows:
@@ -490,7 +528,7 @@ class DocIndex:
         limit: int,
         mode: str = "",
         version: str = "",
-        include_index: bool = False,
+        kinds: Sequence[str] = ("doc",),
     ) -> list[sqlite3.Row]:
         """token_groups 之间 OR，组内 AND（传单组即纯 AND 检索）。"""
         clauses: list[str] = []
@@ -506,10 +544,11 @@ class DocIndex:
             "FROM ft JOIN chunks c ON c.id = ft.rowid WHERE ft MATCH ?"
         )
         sql_args: list[Any] = [*_BM25_WEIGHTS, " OR ".join(clauses)]
-        if not include_index:
-            # 导航页（index.md）是纯链接清单，又短又堆关键词，bm25 天然压过正文；默认不参与检索，
-            # 需要「这些内容在哪些文档里」时由 include_index 显式打开。
-            sql += " AND c.kind = 'doc'"
+        if kinds:
+            # 导航页（index.md / README.md）是纯指路内容、又短又堆关键词，bm25 天然压过正文。
+            # 默认只召回正文（kinds=("doc",)），导航页由 _rank 单独降权召回，见那里的说明。
+            sql += f" AND c.kind IN ({','.join('?' * len(kinds))})"
+            sql_args.extend(kinds)
         if mode:
             sql += " AND (c.mode = ? OR c.mode = '')"
             sql_args.append(_normalize_mode(mode))
@@ -525,7 +564,7 @@ class DocIndex:
             raise DocIndexError(f"检索失败：{exc}") from exc
 
     def _match_expanded(
-        self, query: str, limit: int, mode: str, version: str, include_index: bool
+        self, query: str, limit: int, mode: str, version: str, kinds: Sequence[str] = ("doc",)
     ) -> list[sqlite3.Row]:
         groups: list[list[str]] = []
         for key, aliases in _SYNONYMS.items():
@@ -542,7 +581,7 @@ class DocIndex:
             limit=limit,
             mode=mode,
             version=version,
-            include_index=include_index,
+            kinds=kinds,
         )
 
     # ---- 分节读取 ----

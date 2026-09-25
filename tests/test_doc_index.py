@@ -1,8 +1,8 @@
 """ob_wiki 全文检索层（app.agent.doc_index）与 search_docs / read_doc 工具的契约测试。
 
 用 tmp_path 里的**合成小语料**跑，不依赖 backend/doc 下 5000+ 篇真文档（那套只用于实测）：
-这里固化的是检索语义（中文双字词命中、模式/版本消歧、导航页默认不参与、路径越界拒绝），
-这些点在真语料上实测过的行为见提交说明。
+这里固化的是检索语义（中文双字词命中、模式/版本消歧、导航页/导航小节降权、疑问词过滤、
+路径越界拒绝），这些点在真语料上实测过的行为见提交说明。
 """
 import json
 
@@ -92,19 +92,63 @@ keywords: 事务,隔离级别,锁等待,版本
 - [版本发布记录](./version.md)
 """
 
+# 根 README.md 与 index.md 同属导航类（只指路不讲答案），但它是说明文、不是链接清单
+README_PAGE = """\
+---
+title: OceanBase 本地知识库检索指南
+description: 说明文档库的组织方式与检索方式
+keywords: 索引体系,检索指南
+---
+# OceanBase 本地知识库检索指南
+
+## 索引体系
+
+知识库由分类索引与正文组成，索引页只指路，答案以正文为准。
+"""
+
+# 清单类提问的目标文档：讲错误码本身
+CODE_DOC = """\
+---
+title: 错误码总览
+description: OceanBase 错误码按编号范围分类
+keywords: 错误码,ORA
+---
+## 错误码分类
+
+OceanBase 的错误码按编号范围分段：ORA-00000 ~ ORA-04999 是常见错误，错误码文档里能查到完整清单。
+"""
+
+# 干扰文档：堆满疑问词但不讲答案（真语料里的 FAQ 文档就是这个形态）
+FAQ_DOC = """\
+---
+title: 产品 FAQ
+description: 常见问题罗列
+keywords: FAQ
+---
+## 常见问题
+
+有哪些功能？一共支持多少种场景？包含了哪些限制？这些问题分别有哪些注意事项？
+"""
+
 
 @pytest.fixture
 def wiki(tmp_path):
-    """合成文档库：一篇导航页 + MySQL/Oracle 同名文档 + 锁等待 + 带版本小节。"""
+    """合成文档库：导航页（index.md + README.md）+ MySQL/Oracle 同名文档 + 锁等待 + 版本小节
+    + 清单类提问（错误码，含 FAQ 干扰）。"""
     root = tmp_path / "doc"
     (root / "ob_wiki" / "事务隔离级别").mkdir(parents=True)
     (root / "ob_wiki" / "问题排查").mkdir(parents=True)
     (root / "ob_wiki" / "版本发布记录").mkdir(parents=True)
+    (root / "ob_wiki" / "错误码").mkdir(parents=True)
+    (root / "ob_wiki" / "常见问题").mkdir(parents=True)
     (root / "ob_wiki" / "index.md").write_text(INDEX_PAGE, encoding="utf-8")
+    (root / "ob_wiki" / "README.md").write_text(README_PAGE, encoding="utf-8")
     (root / "ob_wiki" / "事务隔离级别" / "MySQL 模式的事务隔离级别.md").write_text(MYSQL_DOC, encoding="utf-8")
     (root / "ob_wiki" / "事务隔离级别" / "Oracle 模式的事务隔离级别.md").write_text(ORACLE_DOC, encoding="utf-8")
     (root / "ob_wiki" / "问题排查" / "锁等待排查.md").write_text(LOCK_DOC, encoding="utf-8")
     (root / "ob_wiki" / "版本发布记录" / "OceanBase 数据库企业版.md").write_text(VERSION_DOC, encoding="utf-8")
+    (root / "ob_wiki" / "错误码" / "错误码总览.md").write_text(CODE_DOC, encoding="utf-8")
+    (root / "ob_wiki" / "常见问题" / "产品 FAQ.md").write_text(FAQ_DOC, encoding="utf-8")
     return root
 
 
@@ -119,8 +163,8 @@ def idx(wiki):
 def test_ensure_builds_index_and_stats(idx):
     idx.ensure()
     stats = idx.stats()
-    assert stats["docs"] == 5
-    assert stats["chunks"] >= 6
+    assert stats["docs"] == 8
+    assert stats["chunks"] >= 9
     assert stats["schema_version"] == SCHEMA_VERSION
     assert idx.db_path.is_file()
 
@@ -135,7 +179,7 @@ def test_ensure_is_idempotent_and_rebuilds_on_corpus_change(idx, wiki):
         encoding="utf-8",
     )
     idx.ensure()  # 文件数变化 → 指纹变化 → 重建
-    assert idx.stats()["docs"] == 6
+    assert idx.stats()["docs"] == 9
     assert idx.search("合并卡住")[0]["path"].endswith("合并异常问题排查.md")
 
 
@@ -176,13 +220,48 @@ def test_explicit_mode_argument_wins(idx):
     assert all(h["mode"] in ("Oracle", "") for h in hits)
 
 
-def test_navigation_pages_excluded_by_default(idx):
-    """index.md 是纯链接清单，默认不参与检索；显式打开时才出现。"""
+def test_navigation_files_are_downweighted_not_dropped(idx):
+    """index.md 与根 README.md 都归为 nav，默认重降权而不是硬排除。
+
+    不能硬排除：实测真语料里「OceanBase 数据库包含哪些分类」的最佳答案就是根 README.md；
+    也不能不降权：导航页又短又堆关键词，bm25 天然压过正文。
+    """
     default = idx.search("事务")
     assert default
     assert all(h["kind"] == "doc" for h in default)
-    with_index = idx.search("事务", include_index=True)
-    assert any(h["kind"] == "index" for h in with_index)
+
+    # 只有导航页能答的提问，默认也要拿得到（重降权 ≠ 排除）
+    nav_only = idx.search("知识库检索指南")
+    assert nav_only and nav_only[0]["kind"] == "nav"
+    assert nav_only[0]["path"].endswith("README.md")
+
+    # 同一篇 nav 小节：显式打开（include_index=True）时分数更高，默认即使能被召回也被扣分
+    low = {h["path"]: h["score"] for h in idx.search("事务与隔离级别索引", limit=10)}
+    high = {h["path"]: h["score"] for h in idx.search("事务与隔离级别索引", include_index=True, limit=10)}
+    nav_path = next(p for p, s in high.items() if p.endswith("index.md") and s)
+    assert nav_path in low  # 默认仍在候选里（重降权 ≠ 排除）
+    assert low[nav_path] < high[nav_path]
+    # 正文够用时导航页不得插进前列（导航页 bm25 天然更高，扣分不够就会挤掉正文）
+    assert all(h["kind"] == "doc" for h in idx.search("事务与隔离级别索引")[:3])
+
+
+def test_query_tokens_drop_question_words():
+    """清单类提问的字面（「哪些/有哪/一共」）会命中 FAQ 文档，必须在查询侧去掉；
+    同时不能把提问全滤空（退回未过滤结果）。"""
+    from app.agent.doc_index import _query_tokens
+
+    tokens = _query_tokens("错误码一共有哪些")
+    assert {"哪些", "有哪", "一共", "一", "共", "哪", "些"} & set(tokens) == set()
+    assert "错误" in tokens and "误码" in tokens
+    assert _query_tokens("哪些")  # 全被过滤时退回未过滤结果，不会变成空查询
+
+
+def test_list_question_prefers_answer_doc_over_faq_noise(idx):
+    """真语料实测缺陷：没过滤疑问词时「错误码一共有哪些」前三全是 FAQ 类文档。"""
+    hits = idx.search("错误码一共有哪些")
+    assert hits
+    assert hits[0]["title"] == "错误码总览"
+    assert all(h["title"] != "产品 FAQ" for h in hits)
 
 
 def test_version_section_gets_bonus_and_filter(idx):
