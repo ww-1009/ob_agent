@@ -11,7 +11,7 @@ import pytest
 
 from app.agent.tools import _classify_error, _create_db_connect, _error, build_tools
 from app.config import SqlConfig
-from app.tools.base import OcpClientError, SqlExecutionError
+from app.tools.base import OcpClientError, QueryResult, SqlExecutionError
 from app.tools.ocp.mock import MockOcpClient
 from app.tools.ocp.real import _elapsed_us, _first_present, _ms_to_us, _normalize_mode
 from app.tools.sql.base import PooledSqlExecutor
@@ -25,12 +25,18 @@ from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysq
 
 _EXPECTED_TOOLS = {
     "get_tenant_info",
+    "get_cluster_list",
+    "get_cluster_resource_stats",
+    "get_server_resource_stats",
     "get_slow_sql",
     "get_full_sql_text",
     "get_sql_top_plan",
     "get_sql_explain",
+    "compare_plans",
     "execute_sql",
     "get_table_ddl",
+    "search_docs",
+    "read_doc",
     "read_file",
     "list_directory",
 }
@@ -75,6 +81,45 @@ def test_get_tenant_info_ok(tools):
     data = json.loads(tools["get_tenant_info"].invoke({}))
     assert data["ok"] is True
     assert isinstance(data["items"], list) and data["items"]
+
+
+def test_get_cluster_list_renames_id(tools):
+    data = json.loads(tools["get_cluster_list"].invoke({}))
+    assert data["ok"] is True
+    (row,) = data["items"]
+    # 原始字段 id 重命名为 clusterId，供资源水位工具直接使用
+    assert row["clusterId"] == 1 and row["name"] == "obcluster"
+    assert "id" not in row
+
+
+def test_get_cluster_resource_stats_adds_water_level_pct(tools):
+    data = json.loads(tools["get_cluster_resource_stats"].invoke({"cluster_id": 1}))
+    assert data["ok"] is True
+    (row,) = data["items"]
+    assert row["cpuAssignedPct"] == 50.0  # 12 / 24
+    assert row["memoryAssignedPct"] == 66.67  # 64GiB / 96GiB
+    assert row["dataDiskUsedPct"] == 25.0
+    # 白名单外的冗余字段不下发（夹具里带了 obClusterId）
+    assert "obClusterId" not in row
+
+
+def test_get_server_resource_stats_reports_per_node_skew(tools):
+    data = json.loads(tools["get_server_resource_stats"].invoke({"cluster_id": 1}))
+    assert data["ok"] is True
+    assert len(data["items"]) == 3
+    hot = data["items"][2]
+    assert hot["ip"] == "10.0.0.13"
+    assert hot["cpuAssignedPct"] == 87.5
+    assert hot["memoryAssignedPct"] == 93.75
+    assert "timestamp" not in hot  # 采样时间在白名单外，不下发
+
+
+def test_resource_stats_unknown_cluster_is_not_found(tools):
+    # 空结果不是成功：模型必须能区分「水位为 0」与「没取到数据」
+    for name in ("get_cluster_resource_stats", "get_server_resource_stats"):
+        data = json.loads(tools[name].invoke({"cluster_id": 999}))
+        assert data["ok"] is False
+        assert data["error_kind"] == "not_found"
 
 
 def test_get_slow_sql_respects_limit(tools):
@@ -147,16 +192,16 @@ def test_mysql_resolve_config_builds_user_tenant_cluster():
 def test_oracle_resolve_config_uses_tool_db_name_as_service_name():
     # Oracle 模式的 DSN service name 取工具传入的 db_name（配置里已无 service_name 项）
     out = resolve_oracle_config(
-        SqlConfig(host="obproxy", port=2883, username="ro", db_name="shop"), "t1"
+        SqlConfig(host="obproxy", port=2883, username="ro", db_name="shop"), "t1", "c1"
     )
-    assert out.username == "ro@t1"
+    assert out.username == "ro@t1#c1"
     assert out.db_name == "shop"
     assert build_oracle_dsn(out) == "obproxy:2883/shop"
     # 账号已带 @ 原样保留（允许显式指定租户）
-    explicit = resolve_oracle_config(SqlConfig(username="ro@t2", db_name="shop"), "t1")
+    explicit = resolve_oracle_config(SqlConfig(username="ro@t2", db_name="shop"), "t1", "c1")
     assert explicit.username == "ro@t2" and explicit.db_name == "shop"
     # db_name 缺失时回退租户名（防御性兜底，正常调用不会发生）
-    assert resolve_oracle_config(SqlConfig(username="ro"), "t1").db_name == "t1"
+    assert resolve_oracle_config(SqlConfig(username="ro"), "t1", "c1").db_name == "t1"
 
 
 def test_oracle_connection_uses_tool_db_name_as_dsn_service_name():
@@ -174,8 +219,107 @@ def test_oracle_connection_uses_tool_db_name_as_dsn_service_name():
         ),
     )
     assert isinstance(ex, OracleSqlExecutor)
-    assert ex._cfg.username == "ro@t1"
+    assert ex._cfg.username == "ro@t1#c1"
     assert build_oracle_dsn(ex._cfg) == "obproxy:2883/shop"
+
+
+# ---- Oracle：超时按驱动能力下传 + owner 取 db_name --------------------------
+
+
+class _FakeConn:
+    """只实现 _connect / _ping 用到的部分。"""
+
+    def __init__(self):
+        self.outputtypehandler = None
+
+    def ping(self):
+        return None
+
+    def close(self):
+        return None
+
+
+class _CxOracleConn(_FakeConn):
+    """cx_Oracle 侧连接：不支持 call_timeout（赋值即 AttributeError）。"""
+
+    @property
+    def call_timeout(self):
+        raise AttributeError("cx_Oracle Connection has no attribute 'call_timeout'")
+
+    @call_timeout.setter
+    def call_timeout(self, value):
+        raise AttributeError("cx_Oracle Connection has no attribute 'call_timeout'")
+
+
+class _FakeOciDriver:
+    """假 OCI 驱动；``thin=True`` 模拟 python-oracledb，否则模拟 cx_Oracle。"""
+
+    OperationalError = type("OperationalError", (Exception,), {})
+    InterfaceError = type("InterfaceError", (Exception,), {})
+
+    def __init__(self, *, thin: bool, conn=None):
+        if thin:
+            self.is_thin_mode = lambda: True  # python-oracledb 独有，用于能力探测
+        self.conn = conn or _FakeConn()
+        self.connect_kwargs: dict | None = None
+
+    def connect(self, **kwargs):
+        self.connect_kwargs = kwargs
+        return self.conn
+
+
+def _oracle_executor(driver) -> OracleSqlExecutor:
+    ex = _create_db_connect(
+        "t1",
+        "c1",
+        "shop",
+        "ORACLE",
+        SqlConfig(provider="real", host="{'c1': 'obproxy:2883'}", username="ro", password="pw"),
+    )
+    ex._drv = driver  # 跳过惰性装载，避免测试依赖本机是否装了驱动
+    return ex
+
+
+def test_oracle_connect_passes_timeouts_when_driver_supports_them():
+    # python-oracledb 支持 tcp_connect_timeout（建连）与 call_timeout（语句，毫秒）
+    drv = _FakeOciDriver(thin=True)
+    conn = _oracle_executor(drv)._connect()
+    assert drv.connect_kwargs == {
+        "user": "ro@t1#c1",
+        "password": "pw",
+        "dsn": "obproxy:2883/shop",
+        "tcp_connect_timeout": 5,
+    }
+    assert conn.call_timeout == 10_000  # query_timeout_seconds(10) * 1000
+    assert conn.outputtypehandler is not None  # CLOB/BLOB 转换必须挂上
+
+
+def test_oracle_connect_skips_unsupported_timeouts_for_cx_oracle():
+    # cx_Oracle 既无 tcp_connect_timeout 参数也不支持 call_timeout：应静默降级，连接仍可用
+    drv = _FakeOciDriver(thin=False, conn=_CxOracleConn())
+    conn = _oracle_executor(drv)._connect()
+    assert "tcp_connect_timeout" not in drv.connect_kwargs
+    assert not hasattr(conn, "call_timeout")
+    assert conn.outputtypehandler is not None
+
+
+def test_oracle_table_ddl_uses_db_name_as_owner():
+    ex = _oracle_executor(_FakeOciDriver(thin=True))
+    seen: list[str] = []
+
+    def fake_run(sql: str) -> QueryResult:
+        seen.append(sql)
+        if "dbms_metadata" in sql:
+            raise RuntimeError("ORA-00904: DBMS_METADATA 未开放")
+        return QueryResult(columns=["column_name"], rows=[["ID"]], truncated=False)
+
+    ex._run = fake_run
+    ex.table_ddl("scott.emp")  # schema 前缀按约定不生效：owner 恒为本连接的 db_name
+    assert seen[0] == (
+        "select dbms_metadata.get_ddl('TABLE', 'EMP', 'SHOP') as ddl from dual"
+    )
+    # 回退走 all_tab_columns（只读账号一般无 DBA 权限）并限定 owner
+    assert "from all_tab_columns where owner = 'SHOP' and table_name = 'EMP'" in seen[1]
 
 
 # ---- 工具错误：分类 + 脱敏 + 「查不到」不再是成功 ----------------------------
@@ -242,3 +386,70 @@ def test_empty_plan_is_reported_as_failure():
         built["get_sql_explain"].invoke({"cluster_id": 1, "tenant_id": 1001, "uid": "u-1"})
     )
     assert explain["ok"] is False and explain["error_kind"] == "not_found"
+    compared = json.loads(
+        built["compare_plans"].invoke(
+            {"cluster_id": 1, "tenant_id": 1001, "uid_before": "u-1", "uid_after": "u-2"}
+        )
+    )
+    assert compared["ok"] is False and compared["error_kind"] == "not_found"
+
+
+def _two_plan_uids(tools) -> list[str]:
+    """按模型的实际用法取 uid：先 get_sql_top_plan，再拿 items 里的两个计划。"""
+    top = json.loads(
+        tools["get_sql_top_plan"].invoke({"cluster_id": 1, "tenant_id": 1001, "sql_id": "sq-1"})
+    )
+    assert top["ok"] is True
+    return [item["uid"] for item in top["items"]]
+
+
+def test_compare_plans_reports_regression_between_two_plans(tools):
+    before_uid, after_uid = _two_plan_uids(tools)
+    assert before_uid != after_uid
+    data = json.loads(
+        tools["compare_plans"].invoke(
+            {
+                "cluster_id": 1,
+                "tenant_id": 1001,
+                "uid_before": before_uid,
+                "uid_after": after_uid,
+            }
+        )
+    )
+    assert data["ok"] is True
+    assert data["verdict"] == "regressed" and data["changed"] is True
+    assert data["before"]["uid"] == before_uid and data["after"]["uid"] == after_uid
+    # 全表扫描：代价涨两个数量级，回归点落在丢了索引的那张表上
+    assert data["cost_ratio"] > 90
+    assert data["regressions"] and data["regressions"][0]["name"].startswith("WRT(")
+    notes = " ".join(data["highlights"])
+    assert "全表扫描" in notes or any("全表扫描" in n for c in data["access_changes"] for n in c["notes"])
+    assert data["counts"]["added"] == 0 and data["counts"]["removed"] == 0
+
+
+def test_compare_plans_rejects_identical_uids(tools):
+    uid = _two_plan_uids(tools)[0]
+    data = json.loads(
+        tools["compare_plans"].invoke(
+            {"cluster_id": 1, "tenant_id": 1001, "uid_before": uid, "uid_after": uid}
+        )
+    )
+    # 自己比自己必然是 unchanged，给模型一个假结论不如直接报错让它换 uid
+    assert data["ok"] is False and "同一个 uid" in data["error"]
+
+
+def test_compare_plans_treats_the_earlier_plan_as_baseline(tools):
+    """两个 uid 的先后顺序决定 verdict 方向：反过来比应报 improved。"""
+    before_uid, after_uid = _two_plan_uids(tools)
+    data = json.loads(
+        tools["compare_plans"].invoke(
+            {
+                "cluster_id": 1,
+                "tenant_id": 1001,
+                "uid_before": after_uid,
+                "uid_after": before_uid,
+            }
+        )
+    )
+    assert data["verdict"] == "improved"
+    assert data["improved"] and data["improved"][0]["self_cost_after"] < data["improved"][0]["self_cost_before"]

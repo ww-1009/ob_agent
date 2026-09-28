@@ -16,6 +16,7 @@ backend/data/real_*.json
 # 本地临时产物（不入库）
 .tmptest/
 pytest-cache-files-*/
+retrieval-eval.json
 
 # 参考工程（不并入本仓库；仅作 OCP 接口借鉴）
 llm_db/
@@ -25,6 +26,8 @@ llm_db/
 .vscode/
 .jbeval/
 
-ob_wiki/
+# OceanBase 官方文档：zip 入库，解压产物不入库（部署时在 backend/doc 下解压，见 README 第 0 步）
+/backend/doc/*
+!/backend/doc/ob_wiki.zip
 
 .DS_Store/

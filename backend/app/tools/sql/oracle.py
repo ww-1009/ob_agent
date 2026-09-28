@@ -12,8 +12,10 @@ OCI 驱动连 Oracle 模式租户。两者共用 ``app.tools.sql.base.PooledSqlE
   （2021 年最后一版）只发布到 cp310 轮子，在 Python 3.11/3.13 上既无轮子也无
   Python.h 编译源码，因此仅在老环境里才可选。
 
-两个驱动的 API 同源（CLOB / LONG_STRING / LONG_BINARY / cursor.var /
-outputtypehandler / ping / call_timeout 均一致），所以只有装载那一步需要分支。
+两个驱动的 API 大体同源（CLOB / LONG_STRING / LONG_BINARY / cursor.var / outputtypehandler /
+ping 均一致），差异集中在**超时**：python-oracledb 独有 ``tcp_connect_timeout``（建连），
+``call_timeout``（语句，毫秒）两个驱动都有但老版本 cx_Oracle 未必可写，因此超时按驱动能力
+下传、设不上只记日志（见 ``_connect``）；驱动装载那一步同样需要分支。
 导入保持**惰性**（同 mysql.py 对 pymysql 的写法）：没装驱动只影响 Oracle 租户。
 
 连接按执行器实例复用（长连接 + ping 自愈 + 锁串行化），理由同 mysql.py：一轮对话
@@ -21,6 +23,7 @@ outputtypehandler / ping / call_timeout 均一致），所以只有装载那一�
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from app.config import SqlConfig
@@ -28,10 +31,20 @@ from app.tools.base import QueryResult, SqlExecutionError
 from app.tools.sql.base import PooledSqlExecutor
 from app.tools.sql.guard import assert_safe_identifier
 
+logger = logging.getLogger(__name__)
+
 _DRIVER_HINT = (
     "缺少依赖 oracledb，请先 pip install oracledb"
     "（cx_Oracle 无 Python 3.11+ 轮子，选它需要 Python <= 3.10 + Oracle Instant Client）"
 )
+
+
+def _supports_tcp_connect_timeout(drv) -> bool:
+    """``tcp_connect_timeout`` 是 python-oracledb 专有的建连参数：cx_Oracle 传了会报错。
+
+    python-oracledb 独有 ``is_thin_mode``，据此探测（cx_Oracle 侧只能靠 OS/TCP 默认超时）。
+    """
+    return callable(getattr(drv, "is_thin_mode", None)) or getattr(drv, "__name__", "") == "oracledb"
 
 
 def load_driver(name: str):
@@ -75,7 +88,7 @@ def make_type_handler(drv):
     return handler
 
 
-def resolve_config(cfg: SqlConfig, tenant_name: str, cluster_name:str) -> SqlConfig:
+def resolve_config(cfg: SqlConfig, tenant_name: str, cluster_name: str) -> SqlConfig:
     """把 sql_ro 的通用配置解析成「本租户可直连」的 Oracle 配置。
 
     - username：配置里已含 ``@`` 就原样用，否则补成 ``user@tenant#cluster_name``
@@ -116,17 +129,23 @@ class OracleSqlExecutor(PooledSqlExecutor):
 
     def _connect(self):
         drv = self._driver()
-        # tcp_connect_timeout：建连阶段的超时（与 pymysql 的 connect_timeout 对应）
-        conn = drv.connect(
-            user=self._cfg.username,
-            password=self._cfg.password,
-            dsn=build_dsn(self._cfg),
-            #tcp_connect_timeout=self._cfg.connect_timeout,
-        )
+        kwargs = {
+            "user": self._cfg.username,
+            "password": self._cfg.password,
+            "dsn": build_dsn(self._cfg),
+        }
+        if _supports_tcp_connect_timeout(drv):
+            # 建连阶段的超时（与 pymysql 的 connect_timeout 对应）；cx_Oracle 无此参数
+            kwargs["tcp_connect_timeout"] = self._cfg.connect_timeout
+        conn = drv.connect(**kwargs)
         # 类型转换必须在执行任何查询之前挂上
         conn.outputtypehandler = make_type_handler(drv)
-        # call_timeout 单位是毫秒（pymysql 的 read_timeout 是秒）
-        #conn.call_timeout = int(self._cfg.query_timeout_seconds) * 1000
+        # call_timeout 单位是毫秒（pymysql 的 read_timeout 是秒）。老版本 cx_Oracle 没有该
+        # 可写属性，因此是尽力而为：设不上只记日志，不影响连接可用性。
+        try:
+            conn.call_timeout = int(self._cfg.query_timeout_seconds) * 1000
+        except Exception as e:  # noqa: BLE001 - 超时降级，不能让建连失败
+            logger.debug("驱动 %s 不支持 call_timeout，跳过语句超时：%s", self._cfg.driver, e)
         return conn
 
     def _is_connection_error(self, exc: BaseException) -> bool:
@@ -137,11 +156,20 @@ class OracleSqlExecutor(PooledSqlExecutor):
     def table_ddl(self, table_name: str) -> QueryResult:
         """表结构：优先 DBMS_METADATA.GET_DDL（等价于 MySQL 的 SHOW CREATE TABLE）。
 
+        owner 恒取本连接的 ``db_name``（Oracle 模式下它同时是 DSN 的 service name 与该租户的
+        schema），所以 ``schema.table`` 这种写法里的前缀不参与查询，只取对象名——否则整串
+        被当成对象名，GET_DDL 找不到，回退查询也查不到，会静默返回空结果。
+
         部分 OceanBase Oracle 租户未开放 DBMS_METADATA，此时回退到数据字典
-        （dba_tab_columns），至少把列定义返回给模型，而不是整体报错。
+        （``all_tab_columns``，限定 owner；只读账号通常没有 DBA 权限，不能用 ``dba_tab_columns``），
+        至少把列定义返回给模型，而不是整体报错。
         """
-        table_name = assert_safe_identifier(table_name, "表名").upper()
-        db_name = self._cfg.db_name.upper()
+        raw_name = assert_safe_identifier(table_name, "表名")
+        schema, _, bare_name = raw_name.rpartition(".")
+        if schema:
+            logger.debug("忽略表名里的 schema 前缀 %r：owner 固定取 db_name", schema)
+        table_name = bare_name.upper()
+        db_name = (self._cfg.db_name or "").upper()
         ddl_sql = f"select dbms_metadata.get_ddl('TABLE', '{table_name}', '{db_name}') as ddl from dual"
         try:
             return self._run(ddl_sql)
@@ -149,10 +177,11 @@ class OracleSqlExecutor(PooledSqlExecutor):
             raise  # 驱动缺失等环境问题：回退到数据字典也救不了
         except Exception as ddl_err:
             # DBMS_METADATA 不可用（未开放/权限不足）：退回数据字典查列定义
-            # Oracle 里未加引号的表名默认大写存储
+            # Oracle 里未加引号的表名默认大写存储，owner 同样大写
             fallback_sql = (
                 "select column_name, data_type, data_length, data_precision, data_scale, nullable "
-                f"from dba_tab_columns where table_name = '{table_name}' order by column_id"
+                f"from all_tab_columns where owner = '{db_name}' and table_name = '{table_name}' "
+                "order by column_id"
             )
             try:
                 return self._run(fallback_sql)

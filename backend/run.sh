@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动后端（工作目录固定为本脚本所在目录，保证 ./config.yaml、./ob_wiki 等相对路径生效）
+# 启动后端（工作目录固定为本脚本所在目录，保证 ./config.yaml、./doc 等相对路径生效）
 #
 # 依赖来源：backend/requirements.txt —— 仓库不提供 pyproject.toml / uv.lock，
 # 因此不再使用 uv sync。

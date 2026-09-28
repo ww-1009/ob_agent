@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feature-dev]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (pytest + 检索评测门禁)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 安装后端依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      # ob_wiki/ 是解压产物（45 MB、5146 篇）不入库，仓库里只有 zip；没有语料就建不出索引，
+      # 检索评测与文档工具的用例都会失败。脚本同时修了 zip 的文件名编码。
+      - name: 解压官方文档语料
+        run: python backend/scripts/unpack_doc.py
+
+      - name: 后端测试
+        run: python -m pytest -q
+
+      # 检索质量门禁：真语料上的命中率@5 / MRR 低于阈值即失败（阈值与基线见 backend/eval/README.md）。
+      # 放在 pytest 之后，这样门禁失败时测试结果仍然可读。
+      - name: 文档检索评测（门禁）
+        run: python backend/eval/run_eval.py --strict --json retrieval-eval.json
+
+      - name: 上传评测报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval
+          path: retrieval-eval.json
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend (vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 前端测试
+        run: npm test

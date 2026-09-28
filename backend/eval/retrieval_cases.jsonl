@@ -1,0 +1,50 @@
+{"id": "isolation-oracle", "query": "Oracle 模式的事务隔离级别是怎么实现的", "expect": ["Oracle 模式的事务隔离级别"]}
+{"id": "isolation-mysql", "query": "MySQL 租户支持哪几种事务隔离级别", "expect": ["MySQL 模式的事务隔离级别"]}
+{"id": "lock-wait", "query": "如何查看锁等待的 SQL", "expect": ["查询行锁", "查死锁"]}
+{"id": "deadlock", "query": "死锁怎么排查", "expect": ["死锁"]}
+{"id": "slow-sql", "query": "慢 SQL 怎么定位和优化", "expect": ["慢查询"]}
+{"id": "merge-stuck", "query": "合并卡住了怎么处理", "expect": ["合并异常"]}
+{"id": "dump-vs-merge", "query": "转储和合并有什么区别", "expect": ["转储和合并"]}
+{"id": "big-table-index", "query": "大表创建索引有什么注意事项", "expect": ["大表创建索引"]}
+{"id": "table-design", "query": "OceanBase 表设计有哪些规范", "expect": ["数据库设计规范和约束"]}
+{"id": "partition-design", "query": "分区表怎么设计", "expect": ["分区表设计"]}
+{"id": "local-global-index", "query": "局部索引和全局索引有什么区别", "expect": ["局部索引和全局索引"]}
+{"id": "config-overview", "query": "配置项一共有哪些", "expect": ["配置项总览"], "include_index": true, "tag": "list"}
+{"id": "sysvar-overview", "query": "系统变量有哪些", "expect": ["系统变量总览"], "include_index": true, "tag": "list"}
+{"id": "cluster-resource", "query": "怎么查看集群资源水位", "expect": ["集群资源使用状态"]}
+{"id": "tenant-resource", "query": "怎么检查租户的资源使用情况", "expect": ["租户资源使用状态"]}
+{"id": "backup-overview", "query": "物理备份和恢复的整体流程是什么", "expect": ["物理备份与恢复概述", "备份恢复概述"]}
+{"id": "log-archive-pause", "query": "怎么暂停日志归档", "expect": ["暂停归档"]}
+{"id": "flashback", "query": "误删数据怎么用闪回查询恢复", "expect": ["闪回查询"]}
+{"id": "recyclebin", "query": "回收站里的表怎么恢复", "expect": ["恢复回收站对象", "回收站"]}
+{"id": "error-code", "query": "OceanBase 错误码怎么查", "expect": ["参考指南/错误码"]}
+{"id": "ora-00942", "query": "ORA-00942 是什么错误", "expect": ["错误码（Oracle 模式）/ORA-00000"]}
+{"id": "grant", "query": "怎么给普通用户授权", "expect": ["访问控制", "授权"]}
+{"id": "audit", "query": "怎么开启安全审计", "expect": ["安全审计"]}
+{"id": "storage-encrypt", "query": "数据存储加密怎么配置", "expect": ["数据存储加密"]}
+{"id": "charset", "query": "OceanBase 支持哪些字符集", "expect": ["字符集规范", "CHARACTER_SETS"]}
+{"id": "statistics", "query": "统计信息怎么收集", "expect": ["统计信息收集"]}
+{"id": "explain", "query": "怎么看一条 SQL 的执行计划", "expect": ["执行计划"]}
+{"id": "plan-cache", "query": "执行计划缓存怎么管理", "expect": ["执行计划缓存"]}
+{"id": "parallel", "query": "怎么开启并行执行", "expect": ["并行执行"]}
+{"id": "odp-route", "query": "ODP 的路由规则是怎样的", "expect": ["ODP 路由"]}
+{"id": "obproxy-param", "query": "OBProxy 有哪些参数", "expect": ["OBProxy 参数"]}
+{"id": "max-conn", "query": "怎么设置租户最大连接数", "expect": ["设置租户最大连接数"]}
+{"id": "kill-session", "query": "怎么终止一个会话", "expect": ["终止租户会话"]}
+{"id": "partition-balance", "query": "怎么手动触发分区均衡", "expect": ["手动触发分区均衡"]}
+{"id": "log-sync", "query": "副本之间的日志同步是怎么实现的", "expect": ["多副本日志同步"]}
+{"id": "ha-replica", "query": "多副本容灾是怎么做的", "expect": ["多副本容灾"]}
+{"id": "node-failure", "query": "多数派节点故障怎么恢复", "expect": ["多数派节点故障"]}
+{"id": "migration", "query": "把数据迁移到 OceanBase 有哪些方案", "expect": ["数据迁移概述", "数据迁移概览"]}
+{"id": "import-sql-file", "query": "怎么从 SQL 文件导入数据", "expect": ["从 SQL 文件导入数据"]}
+{"id": "export-outfile", "query": "怎么把查询结果导出到文件", "expect": ["OUTFILE 语句导出"]}
+{"id": "compression", "query": "数据压缩和编码的原理", "expect": ["压缩与编码"]}
+{"id": "log-compress", "query": "日志压缩怎么配置", "expect": ["日志压缩与解压"]}
+{"id": "version-425", "query": "OceanBase 4.2.5 版本新增了哪些特性", "expect": ["V4.2.5 文档更新记录"], "tag": "hard"}
+{"id": "full-trace", "query": "怎么做全链路追踪", "expect": ["全链路追踪"]}
+{"id": "obdiag-flame", "query": "用 obdiag 收集火焰图", "expect": ["火焰图"]}
+{"id": "sql-diagnose", "query": "SQL 诊断的方法论", "expect": ["SQL 诊断"]}
+{"id": "slow-overall", "query": "数据库整体变慢怎么排查", "expect": ["系统性能问题排查"]}
+{"id": "merge-memory", "query": "合并时内存不足怎么办", "expect": ["内存相关问题"]}
+{"id": "timeout-4012", "query": "事务超时 ERROR 4012 怎么处理", "expect": ["事务超时"]}
+{"id": "cursor", "query": "PL 游标怎么用", "expect": ["游标概述", "PL 游标"]}

@@ -33,14 +33,20 @@ logger = logging.getLogger(__name__)
 # 工具 → 人性化 status 文案（on_tool_start 用）；须与 build_tools 实际注册的工具名保持一致
 TOOL_STATUS: Dict[str, str] = {
     "get_tenant_info": "正在从 OCP 拉取租户信息…",
+    "get_cluster_list": "正在从 OCP 拉取集群列表…",
+    "get_cluster_resource_stats": "正在从 OCP 拉取集群资源水位…",
+    "get_server_resource_stats": "正在从 OCP 拉取OBServer资源水位…",
     "get_slow_sql": "正在从 OCP 拉取慢SQL…",
     "get_full_sql_text": "正在从 OCP 拉取完整SQL文本…",
     "get_sql_explain": "正在从 OCP 拉取执行计划…",
     "get_sql_top_plan": "正在从 OCP 拉取SQL计划uid…",
+    "compare_plans": "正在对比两份执行计划…",
 
     "execute_sql": "正在执行只读 SQL 查询…",
     "get_table_ddl": "正在获取表结构信息…",
 
+    "search_docs": "正在检索官方文档…",
+    "read_doc": "正在精读官方文档…",
     "read_file": "正在读取官方文档…",
     "list_directory": "正在列出文档目录…",
 }

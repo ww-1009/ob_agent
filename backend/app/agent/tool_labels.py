@@ -6,12 +6,18 @@ from __future__ import annotations
 
 TOOL_LABEL: dict[str, str] = {
     "get_tenant_info": "获取租户信息",
+    "get_cluster_list": "获取集群列表",
+    "get_cluster_resource_stats": "获取集群资源水位",
+    "get_server_resource_stats": "获取OBServer资源水位",
     "get_slow_sql": "拉取慢SQL列表",
     "get_full_sql_text": "拉取完整SQL文本",
     "get_sql_top_plan": "拉取SQL计划uid",
     "get_sql_explain": "拉取执行计划结构",
+    "compare_plans": "对比执行计划",
     "execute_sql": "执行只读 SQL",
     "get_table_ddl": "获取表结构",
+    "search_docs": "检索官方文档",
+    "read_doc": "精读官方文档小节",
     "read_file": "读取官方文档",
     "list_directory": "列出文档目录",
 }

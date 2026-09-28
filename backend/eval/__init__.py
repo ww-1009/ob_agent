@@ -1,0 +1,1 @@
+"""`backend/eval` 包：文档检索评测集与评测脚本（见 README.md）。"""

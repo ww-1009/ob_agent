@@ -1,0 +1,23 @@
+{
+  "clusterId": 1,
+  "clusterName": "obcluster",
+  "obClusterId": 1001,
+  "clusterType": "PRIMARY",
+  "syncStatus": "VALID",
+  "tenantCount": 3,
+  "unitCount": 3,
+  "cpuTotal": 24,
+  "cpuAssigned": 12,
+  "cpuTotalMin": 24,
+  "cpuTotalMax": 24,
+  "cpuAssignedMin": 12,
+  "cpuAssignedMax": 12,
+  "memoryTotalByte": 103079215104,
+  "memoryAssignedByte": 68719476736,
+  "systemMemoryByte": 8589934592,
+  "dataDiskTotalByte": 1099511627776,
+  "dataDiskUsedByte": 274877906944,
+  "logDiskTotalByte": 274877906944,
+  "logDiskAssignedByte": 137438953472,
+  "logDiskUsedByte": 85899345920
+}
