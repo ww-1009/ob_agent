@@ -62,6 +62,10 @@ DEFAULT_LIMIT = 5
 MAX_LIMIT = 20
 # 同一次检索里同一篇文档最多返回几个小节，避免整屏都是同一篇（如"大表创建索引"）
 MAX_CHUNKS_PER_PATH = 2
+# 语料指纹缓存 TTL（秒）：search 每次都全库 stat 一遍，真语料实测约 50ms，占端到端近一半，
+# 而语料在一个 TTL 窗口内几乎不会变。代价是窗口内的改动最迟 TTL 后生效。
+# 0 = 关闭缓存（每次重扫，测试与「必须立刻看到改动」的场景用）。
+DEFAULT_FINGERPRINT_TTL = 5.0
 # bm25 列权重：标题 > 关键词 > 小节名 > 正文
 _BM25_WEIGHTS = (10.0, 6.0, 4.0, 1.0)
 
@@ -268,13 +272,17 @@ class DocIndex:
         *,
         wiki_dirname: str = WIKI_DIRNAME,
         index_filename: str = INDEX_FILENAME,
+        fingerprint_ttl_seconds: float = DEFAULT_FINGERPRINT_TTL,
     ) -> None:
         self.doc_root = Path(doc_root)
         self.wiki_dirname = wiki_dirname
         self.wiki_dir = self.doc_root / wiki_dirname
         self.db_path = self.doc_root / index_filename
+        self.fingerprint_ttl_seconds = max(0.0, float(fingerprint_ttl_seconds))
         self._lock = threading.RLock()
         self._con: sqlite3.Connection | None = None
+        # (指纹, 计算时刻 monotonic, 当时 wiki 目录 mtime_ns)
+        self._fp_cache: tuple[tuple[int, int, int], float, int] | None = None
 
     # ---- 路径 ----
 
@@ -313,7 +321,33 @@ class DocIndex:
 
     # ---- 索引生命周期 ----
 
-    def _fingerprint(self) -> tuple[int, int, int]:
+    def _fingerprint(self, *, fresh: bool = False) -> tuple[int, int, int]:
+        """语料指纹 (文件数, 总字节, 最新 mtime_ns)，带 TTL 缓存。
+
+        缓存失效条件：超过 TTL、wiki 根目录 mtime 变了（增删文件最快能立刻发现）、
+        调用 ``invalidate_fingerprint()`` 或 ``fresh=True``。深层子目录里的**修改**只会改文件
+        mtime，不会改根目录 mtime，靠 TTL 兜底（最迟 TTL 后重建索引）。
+        """
+        ttl = self.fingerprint_ttl_seconds
+        if ttl > 0 and not fresh and self._fp_cache is not None:
+            value, at, dir_mtime = self._fp_cache
+            if time.monotonic() - at < ttl and dir_mtime == self._dir_mtime_ns():
+                return value
+        value = self._scan_fingerprint()
+        self._fp_cache = (value, time.monotonic(), self._dir_mtime_ns())
+        return value
+
+    def invalidate_fingerprint(self) -> None:
+        """丢掉指纹缓存；下次 ``ensure()`` 一定重扫语料。"""
+        self._fp_cache = None
+
+    def _dir_mtime_ns(self) -> int:
+        try:
+            return self.wiki_dir.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def _scan_fingerprint(self) -> tuple[int, int, int]:
         files = size = 0
         newest = 0
         for path in self.wiki_dir.rglob("*.md"):
@@ -339,7 +373,7 @@ class DocIndex:
                 raise DocIndexMissing(
                     f"文档库不存在：{self.doc_root}/{self.wiki_dirname}（请先解压 backend/doc/ob_wiki.zip）"
                 )
-            fingerprint = self._fingerprint()
+            fingerprint = self._fingerprint(fresh=force)
             if not fingerprint[0]:
                 raise DocIndexMissing(f"文档库为空：{self.doc_root}/{self.wiki_dirname}")
             if not force and self.db_path.is_file() and self._is_current(fingerprint):
@@ -445,6 +479,8 @@ class DocIndex:
         finally:
             con.close()
         os.replace(tmp_path, self.db_path)
+        # 刚按这个指纹建完，顺手把它记进缓存：省掉紧随其后的一次全库重扫
+        self._fp_cache = (fingerprint, time.monotonic(), self._dir_mtime_ns())
 
     # ---- 检索 ----
 
@@ -720,19 +756,36 @@ _default_lock = threading.Lock()
 _default: DocIndex | None = None
 
 
+def _configured_fingerprint_ttl() -> float:
+    """从 ``app.config`` 读 retrieval.fingerprint_ttl_seconds；读不到就退回默认值。
+
+    故意延迟到这里才 import/读取：doc_index 也被 eval 与单测直接 import，
+    不能要求一定有配置文件（或配置一定合法）才能检索。
+    """
+    try:
+        from app.config import load_settings
+
+        return float(load_settings().retrieval.fingerprint_ttl_seconds)
+    except Exception:  # 配置缺失/非法都不该让检索起不来
+        return DEFAULT_FINGERPRINT_TTL
+
+
 def configure(
     doc_root: Path | str | None = None,
     *,
     wiki_dirname: str = WIKI_DIRNAME,
     index_filename: str = INDEX_FILENAME,
+    fingerprint_ttl_seconds: float | None = None,
 ) -> DocIndex:
     """重置默认索引实例（测试与 CLI 用）。"""
     global _default
+    ttl = _configured_fingerprint_ttl() if fingerprint_ttl_seconds is None else fingerprint_ttl_seconds
     with _default_lock:
         _default = DocIndex(
             doc_root or DEFAULT_DOC_ROOT,
             wiki_dirname=wiki_dirname,
             index_filename=index_filename,
+            fingerprint_ttl_seconds=ttl,
         )
         return _default
 
@@ -741,7 +794,7 @@ def get_index() -> DocIndex:
     global _default
     with _default_lock:
         if _default is None:
-            _default = DocIndex()
+            _default = DocIndex(fingerprint_ttl_seconds=_configured_fingerprint_ttl())
         return _default
 
 

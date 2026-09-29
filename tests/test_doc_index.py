@@ -5,6 +5,7 @@
 路径越界拒绝），这些点在真语料上实测过的行为见提交说明。
 """
 import json
+import time
 
 import pytest
 
@@ -154,8 +155,15 @@ def wiki(tmp_path):
 
 @pytest.fixture
 def idx(wiki):
-    # 索引库落在 doc_root 下（默认文件名 ob_wiki.index.db），与真实现一致
-    return DocIndex(wiki)
+    # 索引库落在 doc_root 下（默认文件名 ob_wiki.index.db），与真实现一致。
+    # TTL=0：测试里改完语料就要立刻看到重建，不吃指纹缓存。
+    return DocIndex(wiki, fingerprint_ttl_seconds=0)
+
+
+@pytest.fixture
+def idx_cached(wiki):
+    """生产默认（带指纹缓存）的实例，专供缓存行为用例。"""
+    return DocIndex(wiki, fingerprint_ttl_seconds=60.0)
 
 
 # ---- 建库 ----
@@ -186,6 +194,89 @@ def test_ensure_is_idempotent_and_rebuilds_on_corpus_change(idx, wiki):
 def test_missing_wiki_dir_raises(tmp_path):
     with pytest.raises(DocIndexMissing):
         DocIndex(tmp_path / "nowhere").ensure()
+
+
+# ---- 指纹缓存（search 每次都全库 stat，真语料实测约 50ms）----
+
+def test_fingerprint_cache_avoids_rescan(idx_cached, monkeypatch):
+    calls = {"n": 0}
+    real = idx_cached._scan_fingerprint
+
+    def counting():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(idx_cached, "_scan_fingerprint", counting)
+    first = idx_cached._fingerprint()
+    assert idx_cached._fingerprint() == first
+    assert calls["n"] == 1, "TTL 内不应重复全库 stat"
+    idx_cached.invalidate_fingerprint()
+    assert idx_cached._fingerprint() == first
+    assert calls["n"] == 2, "显式失效后必须重扫"
+
+
+def test_fingerprint_cache_expires_after_ttl(wiki):
+    idx = DocIndex(wiki, fingerprint_ttl_seconds=0.05)
+    before = idx._fingerprint()
+    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
+        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
+        encoding="utf-8",
+    )
+    assert idx._fingerprint() == before, "TTL 窗口内沿用缓存值"
+    time.sleep(0.06)
+    assert idx._fingerprint() != before, "TTL 过期后必须重扫并看到新文件"
+
+
+def test_new_subdir_is_noticed_within_ttl_via_dir_mtime(idx_cached, wiki):
+    """新增子目录会改 wiki 根目录 mtime —— 即便 TTL 未到也必须立刻重建。"""
+    idx_cached.ensure()
+    (wiki / "ob_wiki" / "新增目录").mkdir()
+    (wiki / "ob_wiki" / "新增目录" / "新文档.md").write_text(
+        "---\ntitle: 新文档\n---\n## 小节\n\n新增语料。\n", encoding="utf-8"
+    )
+    idx_cached.ensure()
+    assert idx_cached.stats()["docs"] == 9
+
+
+def test_nested_file_change_waits_for_ttl(idx_cached, wiki):
+    """已知取舍：往子目录里加文件不改根目录 mtime，TTL 内会沿用旧索引（最迟 TTL 后生效）。"""
+    idx_cached.ensure()
+    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
+        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
+        encoding="utf-8",
+    )
+    idx_cached.ensure()
+    assert idx_cached.stats()["docs"] == 8, "TTL 内不重建"
+    idx_cached.invalidate_fingerprint()
+    assert idx_cached.stats()["docs"] == 9, "显式失效后立刻重建"
+
+
+def test_ensure_force_bypasses_fingerprint_cache(idx_cached, wiki):
+    idx_cached.ensure()
+    before = idx_cached.db_path.stat().st_mtime_ns
+    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
+        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
+        encoding="utf-8",
+    )
+    idx_cached.ensure()  # 子目录改动 + TTL 未到 → 不重建
+    assert idx_cached.db_path.stat().st_mtime_ns == before
+    idx_cached.ensure(force=True)  # force 必须绕过缓存
+    assert idx_cached.db_path.stat().st_mtime_ns != before
+    assert idx_cached.stats()["docs"] == 9
+
+
+def test_fingerprint_ttl_comes_from_settings(tmp_path, monkeypatch):
+    """TTL 取自 retrieval.fingerprint_ttl_seconds，configure() 与 get_index() 都要接上。"""
+    from app.agent import doc_index as di
+
+    monkeypatch.setattr(di, "_default", None)
+    assert di.configure(tmp_path / "doc", fingerprint_ttl_seconds=0).fingerprint_ttl_seconds == 0.0
+
+    monkeypatch.setenv("RETRIEVAL_FINGERPRINT_TTL_SECONDS", "0.5")
+    assert di._configured_fingerprint_ttl() == 0.5
+    assert di.configure(tmp_path / "doc").fingerprint_ttl_seconds == 0.5
+    monkeypatch.setattr(di, "_default", None)
+    assert di.get_index().fingerprint_ttl_seconds == 0.5
 
 
 # ---- 检索语义 ----

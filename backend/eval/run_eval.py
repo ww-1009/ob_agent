@@ -37,9 +37,11 @@ DEFAULT_CASES = EVAL_DIR / "retrieval_cases.jsonl"
 DEFAULT_DOC_ROOT = _BACKEND / "doc"
 DEFAULT_K = 5
 DEFAULT_DEEP = 10
-# 门禁阈值：基线实测命中率@5 = 82%、MRR@10 = 0.704（50 条用例、5146 篇真语料），
-# 阈值取「基线往下留一点」，只在真正退化时失败；改了排序公式就重新量一遍再调这里。
-DEFAULT_MIN_RECALL = 0.80
+# 门禁阈值：基线实测命中率@5 = 79.33%、MRR@10 = 0.706（179 条用例、5146 篇真语料，FTS5 基线）。
+# 分档（命中率@5）：version 100% / mode 91.67% / body 85.00% / nav 80.00% / literal 67.86% /
+# list 54.55% / hard 54.55%。阈值取「基线往下留一点」，只在真正退化时失败；
+# 改了排序公式、语料或评测集就重新量一遍再调这里。
+DEFAULT_MIN_RECALL = 0.76
 DEFAULT_MIN_MRR = 0.68
 
 
