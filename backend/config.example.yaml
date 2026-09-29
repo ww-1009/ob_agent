@@ -53,3 +53,52 @@ memory:
 auth:
   enabled: false            # true 时除 /api/health 外所有 /api 都要求 Bearer 令牌
   token: ""                 # 与 enabled=true 搭配；为空会导致后端拒绝启动（fail closed）
+retrieval:
+  # 检索后端（Milvus Lite 单引擎：内建 BM25 稀疏 + FLOAT_VECTOR 稠密）。
+  # milvus_path 相对路径按 backend/ 解析，不随启动目录漂移。
+  milvus_path: "doc/ob_wiki.milvus"
+  collection: "ob_chunks"
+  meta_collection: "ob_meta"
+  analyzer: "jieba"            # milvus-lite 3.2.1 的中文分析器类型名必须是 jieba（不是 chinese）
+  dense_index_type: "IVF_FLAT"
+  nlist: 128
+  metric: "COSINE"
+  pool_k: 50                   # 每路融合前的候选数
+  rrf_k: 60                    # 自研 RRF 平滑常数
+  weight_sparse: 1.0
+  weight_dense: 1.0
+  query_timeout_seconds: 5
+  query_cache_size: 512
+  max_text_bytes: 8000         # 倒排文本字节上限（Milvus VARCHAR 按字节计）
+  fingerprint_ttl_seconds: 5.0 # 语料指纹缓存 TTL（秒）；0 = 不缓存
+  version_match_bonus: 8.0     # 取回后、进入 RRF 前的分数调整
+  nav_section_penalty: 12.0
+  nav_file_penalty: 40.0
+  # 影子模式开关：fts5 | sparse | dense | hybrid。删除 FTS5 前保持 fts5，才能逐条比对新旧基线
+  default_retriever: "fts5"
+embedding:
+  # OpenAI 兼容根地址，要含 /v1：代码请求 {base_url}/embeddings
+  base_url: "https://<embedding-host>/v1"
+  # ↓↓↓ 在此填入 embedding 模型的 API key ↓↓↓（本地 Ollama/vLLM 可留空，不发 Authorization 头）
+  api_key: ""
+  model: ""                    # 推荐 BAAI/bge-m3；base_url 与 model 都非空才算「已配置」
+  dims: 1024                   # 必须与模型实际输出维度一致，否则启动/建索引会报错
+  batch_size: 16               # 单次 /embeddings 请求条数上限。DashScope 兼容模式硬上限 20，故保守默认 16
+  concurrency: 4               # 建索引时的并发请求数
+  timeout_seconds: 30
+  query_cache_size: 512        # 查询向量 LRU 容量；0 = 不缓存
+rerank:
+  # auto：配置齐全即启用，缺配置静默关闭；off：关闭；api：强制启用（缺配置直接启动失败）
+  mode: "auto"
+  # jina：{base_url}/rerank（Jina / Cohere 兼容）
+  # dashscope：百炼原生 {host}/api/v1/services/rerank/text-rerank/text-rerank
+  #   实测阿里云百炼 compatible-mode/v1 下没有 /rerank（404），必须用 dashscope
+  protocol: "jina"
+  # 兼容形态填到 /v1 根；dashscope 形态会自动从 base_url 反推 host 拼原生路径
+  base_url: "https://<rerank-host>/v1"
+  # ↓↓↓ 在此填入 reranker 模型的 API key ↓↓↓
+  api_key: ""
+  model: ""
+  top_n: 30                    # 送入 rerank 的候选数
+  timeout_seconds: 3.0         # 超时即保留融合原序（不报错）
+  max_passage_chars: 500       # 单条 passage 截断上限

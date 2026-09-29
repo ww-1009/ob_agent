@@ -141,6 +141,125 @@ class AuthConfig:
 
 
 @dataclass
+class EmbeddingConfig:
+    """稠密一路的外部 Embedding 服务（OpenAI 兼容 POST {base_url}/embeddings）。
+
+    is_configured **有意不要求 api_key**（区别于 LLMConfig）：Ollama / vLLM 等本地
+    服务免鉴权，若把空 key 判成「未配置」，本地开发会被错误地禁用稠密一路。
+    key 为空时请求不发 Authorization 头，由服务端决定是否拒绝。
+    """
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    # 必须与模型实际输出维度一致；不一致由启动/建索引侧报错并提示 --rebuild-vectors
+    dims: int = 1024
+    # 单次 /embeddings 请求的条数上限。DashScope 兼容模式硬上限为 20
+    # （超限返回 400 invalid_parameter_error: batch size is invalid, it should not be larger than 20），
+    # 故保守默认 16；自建 vLLM/Ollama 可调大。
+    batch_size: int = 16           # 建索引时的批量大小
+    concurrency: int = 4           # 建索引时的并发请求数
+    timeout_seconds: int = 30
+    query_cache_size: int = 512    # 查询向量 LRU 容量（0 = 不缓存）
+
+    @property
+    def is_configured(self) -> bool:
+        """base_url 与 model 均非空（去空白后）才算可用。"""
+        return all(bool(getattr(self, f).strip()) for f in ("base_url", "model"))
+
+    @property
+    def endpoint_url(self) -> str:
+        return self.base_url.rstrip("/") + "/embeddings"
+
+
+@dataclass
+class RerankConfig:
+    """后置重排。默认协议 Jina / Cohere 兼容（POST {base_url}/rerank）。
+
+    protocol 说明（实测：DashScope「compatible-mode/v1」并不提供 /rerank，
+    阿里云百炼的重排只能走原生形态）：
+      jina：{base_url}/rerank，请求 {"model","query","documents","top_n"}，
+            响应 results[].index / results[].relevance_score
+      dashscope：{host}/api/v1/services/rerank/text-rerank/text-rerank，
+            请求 {"model","input":{"query","documents"},"parameters":{"top_n",...}}，
+            响应 output.results[].index / output.results[].relevance_score
+
+    mode 语义：
+      auto（默认）：配置齐全即启用，缺配置静默等价 off —— 不阻断启动，由 health 暴露降级
+      off：显式关闭
+      api：显式要求启用；配置不齐直接启动失败（fail closed，避免「以为开了其实没开」）
+    """
+
+    mode: str = "auto"
+    protocol: str = "jina"
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    top_n: int = 30                # 送入 rerank 的候选数
+    timeout_seconds: float = 3.0   # 超时即保留融合原序（不报错）
+    max_passage_chars: int = 500   # 单条 passage 截断上限
+
+    @property
+    def is_configured(self) -> bool:
+        """base_url 与 model 均非空（api_key 可空，理由同 EmbeddingConfig）。"""
+        return all(bool(getattr(self, f).strip()) for f in ("base_url", "model"))
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "off" and self.is_configured
+
+    @property
+    def endpoint_url(self) -> str:
+        base = self.base_url.rstrip("/")
+        if self.protocol != "dashscope":
+            return base + "/rerank"
+        # 原生形态挂在 host 根下：从任何 compatible-mode / v1 形态的 base_url 反推 host
+        if "/api/v1/services/rerank" in base:
+            return base
+        host = base.split("/compatible-mode")[0].rstrip("/")
+        return host + "/api/v1/services/rerank/text-rerank/text-rerank"
+
+
+@dataclass
+class RetrievalConfig:
+    """检索后端（Milvus Lite 单引擎：内建 BM25 稀疏 + FLOAT_VECTOR 稠密）。
+
+    milvus_path 相对 backend/ 解析（锚点同 _default_config_path），不随启动 CWD 漂移。
+    default_retriever 是影子模式开关：M5 接线后由它决定默认走哪一路；M7 删除 FTS5 时
+    改为 "hybrid"（在那之前保持 "fts5" 才能与现有行为逐条比对）。
+    """
+
+    milvus_path: str = "doc/ob_wiki.milvus"
+    collection: str = "ob_chunks"
+    meta_collection: str = "ob_meta"
+    analyzer: str = "jieba"        # milvus-lite 3.2.1 的中文分析器类型名必须是 jieba
+    dense_index_type: str = "IVF_FLAT"
+    nlist: int = 128
+    metric: str = "COSINE"
+    pool_k: int = 50               # 每路融合前的候选数
+    rrf_k: int = 60                # 自研 RRF 的平滑常数
+    weight_sparse: float = 1.0
+    weight_dense: float = 1.0
+    query_timeout_seconds: int = 5
+    query_cache_size: int = 512
+    max_text_bytes: int = 8000     # 倒排文本字节上限（Milvus VARCHAR 按字节计）
+    fingerprint_ttl_seconds: float = 5.0   # 语料指纹缓存 TTL；0 = 不缓存
+    version_match_bonus: float = 8.0       # 取回后调整（进入 RRF 前）
+    nav_section_penalty: float = 12.0
+    nav_file_penalty: float = 40.0
+    default_retriever: str = "fts5"        # fts5 | sparse | dense | hybrid
+
+    def resolve_milvus_path(self) -> Path:
+        p = Path(self.milvus_path)
+        return p if p.is_absolute() else Path(__file__).resolve().parent.parent / p
+
+
+_ALLOWED_RERANK_MODES = ("auto", "off", "api")
+_ALLOWED_RERANK_PROTOCOLS = ("jina", "dashscope")
+_ALLOWED_RETRIEVERS = ("fts5", "sparse", "dense", "hybrid")
+
+
+@dataclass
 class Settings:
     ocp: OcpConfig = field(default_factory=OcpConfig)
     sql_ro: SqlConfig = field(default_factory=SqlConfig)
@@ -148,6 +267,9 @@ class Settings:
     agent: AgentConfig = field(default_factory=AgentConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    rerank: RerankConfig = field(default_factory=RerankConfig)
 
 
 def _default_config_path() -> Path:
@@ -193,6 +315,63 @@ def _validate_agent(agent: AgentConfig) -> None:
         )
 
 
+def _validate_retrieval(settings: Settings) -> None:
+    """校验检索相关配置的自洽性（fail fast，只在配置层面，不碰网络/Milvus）。
+
+    设计取舍：embedding 缺配置 **不是** 错误（稀疏一路仍可用，health 暴露降级）；
+    只有显式要求稠密一路（default_retriever=dense|hybrid，或 search 传入 dense/hybrid）
+    时缺配置才算配置错误。rerank 在 mode=auto 下同样静默降级，mode=api 才 fail closed。
+    """
+    emb, rk, rt = settings.embedding, settings.rerank, settings.retrieval
+
+    for name, value, low in (
+        ("embedding.dims", emb.dims, 1),
+        ("embedding.batch_size", emb.batch_size, 1),
+        ("embedding.concurrency", emb.concurrency, 1),
+        ("embedding.timeout_seconds", emb.timeout_seconds, 1),
+        ("embedding.query_cache_size", emb.query_cache_size, 0),
+        ("retrieval.pool_k", rt.pool_k, 1),
+        ("retrieval.rrf_k", rt.rrf_k, 1),
+        ("retrieval.nlist", rt.nlist, 1),
+        ("retrieval.query_timeout_seconds", rt.query_timeout_seconds, 1),
+        ("retrieval.query_cache_size", rt.query_cache_size, 0),
+        ("retrieval.max_text_bytes", rt.max_text_bytes, 1),
+        ("rerank.top_n", rk.top_n, 1),
+        ("rerank.max_passage_chars", rk.max_passage_chars, 1),
+    ):
+        if value < low:
+            raise ValueError(f"{name} 必须 >= {low}，当前 {value}")
+    if rt.fingerprint_ttl_seconds < 0:
+        raise ValueError(f"retrieval.fingerprint_ttl_seconds 必须 >= 0，当前 {rt.fingerprint_ttl_seconds}")
+    if rk.timeout_seconds <= 0:
+        raise ValueError(f"rerank.timeout_seconds 必须 > 0，当前 {rk.timeout_seconds}")
+
+    if rk.mode not in _ALLOWED_RERANK_MODES:
+        raise ValueError(
+            f"rerank.mode 必须是 {list(_ALLOWED_RERANK_MODES)} 之一，当前 {rk.mode!r}"
+        )
+    if rk.protocol not in _ALLOWED_RERANK_PROTOCOLS:
+        raise ValueError(
+            f"rerank.protocol 必须是 {list(_ALLOWED_RERANK_PROTOCOLS)} 之一，当前 {rk.protocol!r}"
+        )
+    if rk.mode == "api" and not rk.is_configured:
+        raise ValueError(
+            "rerank.mode=api 但 rerank.base_url / rerank.model 未配置齐全："
+            "要么补全配置，要么把 mode 改为 auto（缺配置静默关闭）或 off"
+        )
+
+    if rt.default_retriever not in _ALLOWED_RETRIEVERS:
+        raise ValueError(
+            f"retrieval.default_retriever 必须是 {list(_ALLOWED_RETRIEVERS)} 之一，"
+            f"当前 {rt.default_retriever!r}"
+        )
+    if rt.default_retriever in ("dense", "hybrid") and not emb.is_configured:
+        raise ValueError(
+            f"retrieval.default_retriever={rt.default_retriever} 需要稠密一路，"
+            "但 embedding.base_url / embedding.model 未配置齐全"
+        )
+
+
 def load_settings(
     config_path: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -216,6 +395,9 @@ def load_settings(
     agent_y = data.get("agent", {}) or {}
     memory_y = data.get("memory", {}) or {}
     auth_y = data.get("auth", {}) or {}
+    retrieval_y = data.get("retrieval", {}) or {}
+    embedding_y = data.get("embedding", {}) or {}
+    rerank_y = data.get("rerank", {}) or {}
 
     verify_ssl_env = _env_nonempty(env, "OCP_VERIFY_SSL")
     send_row_data_env = _env_nonempty(env, "SEND_ROW_DATA")
@@ -308,6 +490,85 @@ def load_settings(
             ),
             token=_env_nonempty(env, "AUTH_TOKEN") or auth_y.get("token", ""),
         ),
+        retrieval=RetrievalConfig(
+            milvus_path=_env_nonempty(env, "RETRIEVAL_MILVUS_PATH")
+            or retrieval_y.get("milvus_path", "doc/ob_wiki.milvus"),
+            collection=_env_nonempty(env, "RETRIEVAL_COLLECTION")
+            or retrieval_y.get("collection", "ob_chunks"),
+            meta_collection=_env_nonempty(env, "RETRIEVAL_META_COLLECTION")
+            or retrieval_y.get("meta_collection", "ob_meta"),
+            analyzer=_env_nonempty(env, "RETRIEVAL_ANALYZER") or retrieval_y.get("analyzer", "jieba"),
+            dense_index_type=_env_nonempty(env, "RETRIEVAL_DENSE_INDEX_TYPE")
+            or retrieval_y.get("dense_index_type", "IVF_FLAT"),
+            nlist=int(_env_nonempty(env, "RETRIEVAL_NLIST") or retrieval_y.get("nlist", 128)),
+            metric=_env_nonempty(env, "RETRIEVAL_METRIC") or retrieval_y.get("metric", "COSINE"),
+            pool_k=int(_env_nonempty(env, "RETRIEVAL_POOL_K") or retrieval_y.get("pool_k", 50)),
+            rrf_k=int(_env_nonempty(env, "RETRIEVAL_RRF_K") or retrieval_y.get("rrf_k", 60)),
+            weight_sparse=float(
+                _env_nonempty(env, "RETRIEVAL_WEIGHT_SPARSE") or retrieval_y.get("weight_sparse", 1.0)
+            ),
+            weight_dense=float(
+                _env_nonempty(env, "RETRIEVAL_WEIGHT_DENSE") or retrieval_y.get("weight_dense", 1.0)
+            ),
+            query_timeout_seconds=int(
+                _env_nonempty(env, "RETRIEVAL_QUERY_TIMEOUT_SECONDS")
+                or retrieval_y.get("query_timeout_seconds", 5)
+            ),
+            query_cache_size=int(
+                _env_nonempty(env, "RETRIEVAL_QUERY_CACHE_SIZE") or retrieval_y.get("query_cache_size", 512)
+            ),
+            max_text_bytes=int(
+                _env_nonempty(env, "RETRIEVAL_MAX_TEXT_BYTES") or retrieval_y.get("max_text_bytes", 8000)
+            ),
+            fingerprint_ttl_seconds=float(
+                _env_nonempty(env, "RETRIEVAL_FINGERPRINT_TTL_SECONDS")
+                or retrieval_y.get("fingerprint_ttl_seconds", 5.0)
+            ),
+            version_match_bonus=float(
+                _env_nonempty(env, "RETRIEVAL_VERSION_MATCH_BONUS")
+                or retrieval_y.get("version_match_bonus", 8.0)
+            ),
+            nav_section_penalty=float(
+                _env_nonempty(env, "RETRIEVAL_NAV_SECTION_PENALTY")
+                or retrieval_y.get("nav_section_penalty", 12.0)
+            ),
+            nav_file_penalty=float(
+                _env_nonempty(env, "RETRIEVAL_NAV_FILE_PENALTY") or retrieval_y.get("nav_file_penalty", 40.0)
+            ),
+            default_retriever=_env_nonempty(env, "RETRIEVAL_DEFAULT_RETRIEVER")
+            or retrieval_y.get("default_retriever", "fts5"),
+        ),
+        embedding=EmbeddingConfig(
+            base_url=_env_nonempty(env, "EMBEDDING_BASE_URL") or embedding_y.get("base_url", ""),
+            api_key=_env_nonempty(env, "EMBEDDING_API_KEY") or embedding_y.get("api_key", ""),
+            model=_env_nonempty(env, "EMBEDDING_MODEL") or embedding_y.get("model", ""),
+            dims=int(_env_nonempty(env, "EMBEDDING_DIMS") or embedding_y.get("dims", 1024)),
+            batch_size=int(_env_nonempty(env, "EMBEDDING_BATCH_SIZE") or embedding_y.get("batch_size", 64)),
+            concurrency=int(
+                _env_nonempty(env, "EMBEDDING_CONCURRENCY") or embedding_y.get("concurrency", 4)
+            ),
+            timeout_seconds=int(
+                _env_nonempty(env, "EMBEDDING_TIMEOUT_SECONDS") or embedding_y.get("timeout_seconds", 30)
+            ),
+            query_cache_size=int(
+                _env_nonempty(env, "EMBEDDING_QUERY_CACHE_SIZE") or embedding_y.get("query_cache_size", 512)
+            ),
+        ),
+        rerank=RerankConfig(
+            mode=_env_nonempty(env, "RERANK_MODE") or rerank_y.get("mode", "auto"),
+            protocol=_env_nonempty(env, "RERANK_PROTOCOL") or rerank_y.get("protocol", "jina"),
+            base_url=_env_nonempty(env, "RERANK_BASE_URL") or rerank_y.get("base_url", ""),
+            api_key=_env_nonempty(env, "RERANK_API_KEY") or rerank_y.get("api_key", ""),
+            model=_env_nonempty(env, "RERANK_MODEL") or rerank_y.get("model", ""),
+            top_n=int(_env_nonempty(env, "RERANK_TOP_N") or rerank_y.get("top_n", 30)),
+            timeout_seconds=float(
+                _env_nonempty(env, "RERANK_TIMEOUT_SECONDS") or rerank_y.get("timeout_seconds", 3.0)
+            ),
+            max_passage_chars=int(
+                _env_nonempty(env, "RERANK_MAX_PASSAGE_CHARS") or rerank_y.get("max_passage_chars", 500)
+            ),
+        ),
     )
     _validate_agent(settings.agent)
+    _validate_retrieval(settings)
     return settings

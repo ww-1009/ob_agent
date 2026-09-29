@@ -1,0 +1,90 @@
+{
+  "embedding": {
+    "url": "https://ws-abw206lyje977bs4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings",
+    "model": "qwen3.7-text-embedding",
+    "expected_dims": 1024,
+    "single_status": 200,
+    "single_ms": 224.7,
+    "top_level_keys": [
+      "data",
+      "id",
+      "model",
+      "object",
+      "usage"
+    ],
+    "single_dims": 1024,
+    "dims_match": true,
+    "vector_head": [
+      0.0341,
+      0.0322,
+      0.0119
+    ],
+    "usage": {
+      "prompt_tokens": 26,
+      "total_tokens": 26
+    },
+    "item_keys": [
+      "embedding",
+      "index",
+      "object"
+    ],
+    "batch_status": 200,
+    "batch_ms": 464.6,
+    "batch_size": 16,
+    "batch_count": 16,
+    "batch_order_ok": true,
+    "batch_dims": [
+      1024
+    ],
+    "batch_ms_per_item": 29.0
+  },
+  "rerank": {
+    "url": "https://ws-abw206lyje977bs4.cn-beijing.maas.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+    "protocol": "dashscope",
+    "model": "qwen3.7-text-rerank",
+    "top_n": 15,
+    "passage_chars": 500,
+    "timeout": 3.0,
+    "status": 200,
+    "ms": 194.2,
+    "top_level_keys": [
+      "output",
+      "request_id",
+      "usage"
+    ],
+    "result_count": 15,
+    "top_n_respected": true,
+    "result_keys": [
+      "index",
+      "relevance_score"
+    ],
+    "ranking": [
+      {
+        "index": 0,
+        "score": 0.9991797064060488
+      },
+      {
+        "index": 1,
+        "score": 0.4417038777939101
+      },
+      {
+        "index": 8,
+        "score": 0.2003237059380596
+      },
+      {
+        "index": 6,
+        "score": 0.1903019837734209
+      },
+      {
+        "index": 14,
+        "score": 0.18999382837793066
+      }
+    ],
+    "relevant_first": true,
+    "relevance_separated": true,
+    "usage": {
+      "prompt_tokens": 1585,
+      "total_tokens": 1585
+    }
+  }
+}
