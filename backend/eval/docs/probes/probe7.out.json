@@ -1,0 +1,371 @@
+{
+ "1_nullable_dense": {
+  "ok": true,
+  "result": {
+   "omit_field": "DataNotMatchException: <DataNotMatchException: (code=1, message=Insert missed an field `vector` to collection without set nullable==true or set default_value)>",
+   "explicit_none": "MilvusException: <MilvusException: (code=6, message=FieldData 'vector' declared FloatVector but no float_vector data is set)>",
+   "zero_vector": "accepted",
+   "row_count": 3,
+   "dense_top5": [
+    [
+     1,
+     "doc",
+     1.0
+    ],
+    [
+     2,
+     "doc",
+     0.0
+    ],
+    [
+     5,
+     "nav",
+     0.0
+    ]
+   ],
+   "dense_filtered_doc_only": [
+    [
+     1,
+     "a.md"
+    ],
+    [
+     2,
+     "b.md"
+    ]
+   ],
+   "nullable_dense": false
+  },
+  "seconds": 5.81
+ },
+ "2_varchar_max_length_unit": {
+  "ok": true,
+  "result": {
+   "ascii_90_bytes": "accepted",
+   "cjk_40_chars_120_bytes": "accepted",
+   "cjk_60_chars_180_bytes": "accepted",
+   "cjk_100_chars_300_bytes": "accepted",
+   "max_length_unit": "chars",
+   "note": "100 = max_length；CJK 40 字=120 字节，若按字节算应当直接失败"
+  },
+  "seconds": 0.57
+ },
+ "3_jieba_literal_queries": {
+  "ok": true,
+  "result": {
+   "ob_query_timeout": [
+    [
+     1,
+     8.482
+    ],
+    [
+     2,
+     4.481
+    ]
+   ],
+   "GV$OB_UNITS": [
+    [
+     2,
+     6.96
+    ],
+    [
+     1,
+     3.748
+    ],
+    [
+     7,
+     3.522
+    ]
+   ],
+   "ORA-00942": [
+    [
+     3,
+     6.413
+    ]
+   ],
+   "00942": [
+    [
+     3,
+     2.804
+    ]
+   ],
+   "4.2.5": [
+    [
+     4,
+     6.413
+    ]
+   ],
+   "V$SYSSTAT": [
+    [
+     6,
+     4.831
+    ],
+    [
+     7,
+     3.522
+    ],
+    [
+     2,
+     1.856
+    ]
+   ],
+   "锁等待的 SQL": [
+    [
+     5,
+     8.643
+    ]
+   ],
+   "备份恢复": [
+    [
+     8,
+     5.825
+    ]
+   ]
+  },
+  "seconds": 0.55
+ },
+ "4_filter_exprs": {
+  "ok": true,
+  "result": {
+   "kind == \"doc\"": [
+    1,
+    2
+   ],
+   "kind in [\"doc\", \"nav\"]": [
+    1,
+    3,
+    2
+   ],
+   "kind != \"nav\"": [
+    1,
+    2
+   ],
+   "path like \"%分区表设计.md\"": [
+    1
+   ],
+   "path like \"a/%\"": [
+    1,
+    3,
+    2
+   ],
+   "(mode == \"Oracle\" or mode == \"\")": [
+    3,
+    2
+   ],
+   "(version == \"\" or version like \"4.2.5%\")": [
+    1,
+    3
+   ],
+   "kind == \"doc\" and version == \"4.2.5\"": [
+    1
+   ],
+   "id in [1, 3]": [
+    1,
+    3
+   ]
+  },
+  "seconds": 2.65
+ },
+ "5_multiprocess_lock": {
+  "ok": true,
+  "result": {
+   "while_open": {
+    "returncode": 1,
+    "stdout": "",
+    "stderr": " from_uri\n    raise ConnectionConfigException(message=\"Open local milvus failed\")\npymilvus.exceptions.ConnectionConfigException: <ConnectionConfigException: (code=1, message=Open local milvus failed)>"
+   },
+   "after_close": {
+    "returncode": 1,
+    "stdout": "",
+    "stderr": " from_uri\n    raise ConnectionConfigException(message=\"Open local milvus failed\")\npymilvus.exceptions.ConnectionConfigException: <ConnectionConfigException: (code=1, message=Open local milvus failed)>"
+   },
+   "after_release_server": {
+    "returncode": 0,
+    "stdout": "child_opened ['filters', 'jieba', 'maxlen', 'nullable']",
+    "stderr": ""
+   },
+   "in_process_reopen": [
+    "filters",
+    "jieba",
+    "maxlen",
+    "nullable"
+   ]
+  },
+  "seconds": 2.27
+ },
+ "6_hybrid_and_latency": {
+  "ok": true,
+  "result": {
+   "insert_3k_s": 1.8,
+   "data_dir_mb": 13.5,
+   "latency_ms_p50": {
+    "sparse": 288.5,
+    "dense": 280.5,
+    "hybrid_builtin": 553.4
+   },
+   "latency_ms_max": {
+    "sparse": 355.9,
+    "dense": 295.0,
+    "hybrid_builtin": 615.8
+   },
+   "builtin_top10": [
+    0,
+    2964,
+    1,
+    1135,
+    2,
+    842,
+    3,
+    2738,
+    4,
+    2074
+   ],
+   "weighted_top10": [
+    2964,
+    1135,
+    842,
+    2738,
+    2074,
+    856,
+    2260,
+    1512,
+    2401,
+    197
+   ],
+   "manual_rrf_top10": [
+    0,
+    2964,
+    1,
+    1135,
+    2,
+    842,
+    3,
+    2738,
+    4,
+    2074
+   ],
+   "builtin_scores": [
+    0.016393,
+    0.016393,
+    0.016129
+   ]
+  },
+  "seconds": 24.26
+ },
+ "7_meta_collection": {
+  "ok": true,
+  "result": {
+   "no_vector_field": "MilvusException: <MilvusException: (code=6, message=schema has no vector field (FLOAT_VECTOR or SPARSE_FLOAT_VECTOR))>",
+   "rows": [
+    {
+     "key": "schema_version",
+     "value": "3",
+     "num": 3.0
+    },
+    {
+     "key": "dims",
+     "value": "1024",
+     "num": 1024.0
+    }
+   ],
+   "collections": [
+    "filters",
+    "hybrid3k",
+    "jieba",
+    "maxlen",
+    "nullable",
+    "ob_meta"
+   ],
+   "data_dir_mb": 13.5
+  },
+  "seconds": 2.55
+ },
+ "8_dense_index_choice": {
+  "ok": true,
+  "result": {
+   "rss_mb_after_load": 489.4,
+   "desc_before": {
+    "index_type": "IVF_FLAT",
+    "metric_type": "COSINE",
+    "total_rows": 3000,
+    "state": "Finished"
+   },
+   "ivf_flat_default": {
+    "p50": 281.6,
+    "min": 279.4,
+    "max": 291.3
+   },
+   "ivf_flat_nprobe1": {
+    "p50": 283.1,
+    "min": 282.0,
+    "max": 284.6
+   },
+   "ivf_flat_nprobe32": {
+    "p50": 286.4,
+    "min": 285.2,
+    "max": 287.7
+   },
+   "hnsw_build_s": 0.8,
+   "hnsw_desc": {
+    "index_type": "HNSW",
+    "metric_type": "COSINE",
+    "total_rows": 3000,
+    "state": "Finished"
+   },
+   "hnsw_default": {
+    "p50": 284.7,
+    "min": 281.8,
+    "max": 298.8
+   },
+   "hnsw_ef16": {
+    "p50": 286.7,
+    "min": 281.9,
+    "max": 291.2
+   },
+   "hnsw_ef200": {
+    "p50": 282.8,
+    "min": 281.2,
+    "max": 297.3
+   },
+   "dir_mb": 13.5,
+   "rss_mb_end": 489.4
+  },
+  "seconds": 27.14
+ },
+ "9_big25k_warm": {
+  "ok": true,
+  "result": {
+   "insert_25k_s": 74.4,
+   "rss_mb": 1350.6,
+   "sparse_l50": {
+    "p50": 779.3,
+    "min": 690.7,
+    "max": 872.7
+   },
+   "sparse_filter_doc_l50": {
+    "p50": 786.7,
+    "min": 708.0,
+    "max": 834.1
+   },
+   "dense_l50": {
+    "p50": 598.8,
+    "min": 582.9,
+    "max": 757.9
+   },
+   "hybrid_builtin_l10": {
+    "p50": 1363.4,
+    "min": 1255.5,
+    "max": 1430.0
+   },
+   "data_dir_mb": 210.0,
+   "kb_per_chunk_1k": 8.4,
+   "desc_dense": {
+    "index_type": "IVF_FLAT",
+    "metric_type": "COSINE",
+    "total_rows": 26000,
+    "state": "Finished"
+   }
+  },
+  "seconds": 143.48,
+  "note": "本段是在**建索引的那个进程内**量的，数字是构建期伪影（sparse P50 630–780 ms / dense 490–600 ms，比 reopen 后高约 6–10 倍），**不要当 M6 延迟基线**。权威口径见 probe8_reopen_latency.py / probe8.out.json（25000 行：close 后新进程 reopen → sparse P50 106.9 ms / dense 26.0 ms / 内建 hybrid 122.4 ms，open+load 0.59 s；同一目录在建索引进程内是 sparse 653 / dense 491 ms）。另注：本段插入循环 range(0, 25000, 2000) 内部又插 2000 行，实插 26000 行（所以 total_rows=26000）。"
+ }
+}

@@ -233,7 +233,7 @@
 | `vector` | `FLOAT_VECTOR(1024)` | 稠密向量（embedding 模型维度，需与 `ob_meta.dims` 一致） |
 | `path` / `section` / `title` | `VARCHAR` | 结果回传与 `read_doc` 对齐 |
 | `mode` / `version` | `VARCHAR(16)` | 标量过滤（复刻 `mode == ? or mode == ""`、`version like ?`） |
-| `kind` | `VARCHAR(8)` | `doc` / `nav`；**导航文件是否嵌入由本字段决定**（v2 决策：**不嵌入**，见 §8.4） |
+| `kind` | `VARCHAR(8)` | `doc` / `nav`；导航行照常写入（**零向量**），稠密一路恒 `filter kind == "doc"`（§8.4） |
 
 Function 与索引声明：
 
@@ -251,7 +251,7 @@ ip.add_index("version", index_type="INVERTED")
 ip.add_index("kind",    index_type="INVERTED")
 ```
 
-> **`max_length=8000` 的依据**：Milvus 的 `VARCHAR` 上限按**字节**计。1800 字中文 ≈ 5400 字节，加标题/小节前缀后仍 <8000。实测 25k 块用该 schema 构建成功（§3.3）。
+> **`max_length=8000` 的依据**：milvus-lite 3.2.1 实测 `VARCHAR` 的上限按**字符**计，不是按字节（probe7 第 2 节：`max_length=100` 能写入 100 个汉字 = 300 字节）。1800 字中文正文加标题/小节前缀远小于 8000 字符；配置里的 `max_text_bytes=8000` 守卫仍按字节算，比 schema 更保守，安全。
 
 ### 5.2 `ob_meta`（键值集合，取代原 SQLite `meta` 表）
 
@@ -270,10 +270,14 @@ ip.add_index("kind",    index_type="INVERTED")
 | 项 | 值 |
 | --- | --- |
 | 稀疏索引 | `SPARSE_INVERTED_INDEX`，`metric_type="BM25"` |
-| 稠密索引 | `IVF_FLAT` + `COSINE`，`nlist=128`（25k 规模实测 P50 12.8 ms） |
+| 稠密索引 | `IVF_FLAT` + `COSINE`，`nlist=128`（25k 重开后实测 P50 ≈27 ms） |
 | 标量索引 | `mode`/`version`/`kind` 建 `INVERTED` |
 | 磁盘 | **≈8.7 KB/块** → 25077 块 ≈ **220–240 MB**（构建后 218 MB，查询后涨到 239 MB，需持续观察 compaction 是否回落） |
-| 构建 | 25k 块 **32.3 s**（不含 embedding；embedding 是大头，见 §12） |
+| 构建 | 25k 块 **75 s**（Linux 2 vCPU，不含 embedding；embedding 是大头，见 §12） |
+
+> **延迟测量口径（M6 门禁必须遵守）**：milvus-lite v3 是纯 Python 进程内实现，**在建索引的那个进程里测延迟会得到约 10x 的伪影**（同一目录 26000 行：构建进程内 sparse P50 779 ms / dense 599 ms，close 后在新进程 reopen 同一目录 → sparse 109 ms / dense 27 ms）。所以基线一律「**构建 → close → 新进程 reopen 再测**」，且测量期间机器上不能有别的重活（2 vCPU 上并发两个 Milvus 进程会把 P50 从 ~80 ms 推到 ~800 ms）。Linux 权威读数（26k 行）：sparse P50 85–110 ms（随查询词命中量浮动）、dense 27–29 ms，内建 `RRFRanker` hybrid ≈100–140 ms。
+>
+> 索引类型在 25k 规模上几乎不影响延迟：`IVF_FLAT`（nprobe 1/8/32 = 23.1/24.8/27.7 ms）与 `HNSW`（ef 16/64/200 = 23.6/24.5/25.8 ms）同档；HNSW 反而多 22 MB 磁盘与 12.8 s 构建时间，**保持 `IVF_FLAT`**。
 
 ### 5.4 data_dir 与原子重建
 
@@ -358,7 +362,7 @@ python -m app.agent.milvus_index --verify            # 两路可查 + meta 一�
 6. 写入 `ob_meta`：`schema_version` / `corpus_fingerprint` / `embedding_model` / `dims` / `analyzer` / `built_at`。
 7. 原子切换临时目录。
 
-> **导航文件（`kind='nav'`）不嵌入、不写入 `ob_chunks`**（v2 决策，与 v1 §8.3 一致）：它们的检索价值由稀疏一路承担。这样 `include_index=true` 时导航页仍可出现（走稀疏一路），而稠密一路永远不会把导航页顶到前面。**代价**：v1 §8.4 的稠密导航惩罚逻辑不再需要，但 `literal`/清单类查询的召回完全押在 BM25 上。
+> **导航文件（`kind='nav'`）写入 `ob_chunks` 但不嵌入**（M3 决议，取代上一版「不写入」的说法）：导航行照常参与稀疏一路，稠密一路恒 `filter kind == "doc"`，因此 `include_index=true` 时导航页仍可出现（走 BM25），而稠密一路永远不会把导航页顶到前面。**为什么必须写进去**：`_is_navigation_section` 的 −40 惩罚与「导航页永不 top1」硬门禁（[tests/test_retrieval_eval.py:71](../../../tests/test_retrieval_eval.py#L71)）都靠这一行的存在；而 `FLOAT_VECTOR` 不可空（probe7 第 1 节），所以导航行的向量写零向量（COSINE 下 distance=0，只要不加过滤也不会盖过真正相关的 doc 行）。**代价**：导航行多占一份 `text` 存储。
 
 ---
 

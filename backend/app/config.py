@@ -242,7 +242,7 @@ class RetrievalConfig:
     weight_dense: float = 1.0
     query_timeout_seconds: int = 5
     query_cache_size: int = 512
-    max_text_bytes: int = 8000     # 倒排文本字节上限（Milvus VARCHAR 按字节计）
+    max_text_bytes: int = 8000     # 倒排文本上限；Milvus 的 VARCHAR max_length 实测按字符计，这里仍按字节保守守卫
     fingerprint_ttl_seconds: float = 5.0   # 语料指纹缓存 TTL；0 = 不缓存
     version_match_bonus: float = 8.0       # 取回后调整（进入 RRF 前）
     nav_section_penalty: float = 12.0

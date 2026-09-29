@@ -61,6 +61,25 @@ pytest 里的门禁（`tests/test_retrieval_eval.py`）就是同一套：语料�
 `literal` 是后续引擎迁移的主对照档：Milvus 稀疏一路（内建 BM25）迁移后，要求这一档
 **相对本条基线退化不超过 1 条**（即 ≥19/28）。延迟数字带指纹 TTL 缓存（见下）。
 
+### 引擎迁移门禁（2026-09 决定，对照本页 179 条基线）
+
+Milvus 迁移不沿用旧文档按 50 条用例写的 80%/88%，一律对照本页基线：
+
+| 通道 | 命中率@5 | MRR@10 | 说明 |
+| --- | --- | --- | --- |
+| 现状 FTS5 | ≥0.76 | ≥0.68 | 现有 `--min-recall/--min-mrr` 默认值 |
+| Milvus sparse | ≥0.78 | ≥0.70 | 对照基线 79.33% / 0.706，不退化即可 |
+| Milvus hybrid | ≥0.85 | ≥0.72 | 起步值，M6 实测后再收紧 |
+
+外加：`literal` 档退化 ≤1 条（≥19/28）、导航页抢 top1 越界 = 0、故障不得 500（embedding 挂
+只跑稀疏；Milvus 打不开返回空结果 + `retrieval_degraded`；rerank 超时保留融合序）。
+hybrid 的延迟门禁等 Linux 实测后再定（API embedding 单次约 +210ms，旧「hybrid P50 ≤150ms」不可达）。
+
+**延迟必须按「构建 → close → 新进程 reopen 再测」的口径取**：milvus-lite v3 是纯 Python 进程内
+实现，在建索引的那个进程里测会得到约 10x 的伪影（同一目录 26000 行：构建进程内 sparse P50 779ms /
+dense 599ms，reopen 后 109ms / 27ms）。测量期间机器上也不能有别的重活——2 vCPU 上并发两个 Milvus
+进程同样把 P50 从 ~80ms 推到 ~800ms。Linux 权威读数见 `docs/probes/probe7.out.json` 与设计文档 §5.3。
+
 已知的弱项（评测暴露、尚未修，属于 P2/P3 范围）：
 
 - 错码/范围页这类「一条文档覆盖几百个错误码」的页，字面量查询常被更短的页面挤掉：
