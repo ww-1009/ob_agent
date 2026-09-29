@@ -1,0 +1,54 @@
+{
+ "1_bm25_enable_analyzer": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=6, message=unknown tokenizer type: 'chinese' (supported: 'standard', 'jieba'))>"
+ },
+ "2_analyzer_tokens": {
+  "ok": true,
+  "result": {
+   "chinese": "ERR _InactiveRpcError: <_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.UNIMPLEMENTED\n\tdetails = \"Method not implemented!\"\n\tdebug_",
+   "standard": "ERR _InactiveRpcError: <_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.UNIMPLEMENTED\n\tdetails = \"Method not implemented!\"\n\tdebug_"
+  }
+ },
+ "3_bm25_scale_latency": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=6, message=unknown tokenizer type: 'chinese' (supported: 'standard', 'jieba'))>"
+ },
+ "4_bm25_idf_drift": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=100, message=collection 'bm25_scale' does not exist)>"
+ },
+ "5_bm25_scalar_filter": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=6, message=unknown tokenizer type: 'chinese' (supported: 'standard', 'jieba'))>"
+ },
+ "6_dense_index_types": {
+  "ok": true,
+  "result": {
+   "FLAT": {
+    "p50_ms": 26.4,
+    "max_ms": 54.3,
+    "index_type_reported": "FLAT"
+   },
+   "HNSW": {
+    "p50_ms": 33.9,
+    "max_ms": 64.5,
+    "index_type_reported": "HNSW"
+   },
+   "AUTOINDEX": {
+    "p50_ms": 32.8,
+    "max_ms": 86.4,
+    "index_type_reported": "AUTOINDEX"
+   },
+   "IVF_FLAT": {
+    "p50_ms": 10.4,
+    "max_ms": 39.3,
+    "index_type_reported": "IVF_FLAT"
+   }
+  }
+ },
+ "7_builtin_hybrid_rrf": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=6, message=unknown tokenizer type: 'chinese' (supported: 'standard', 'jieba'))>"
+ }
+}

@@ -1,0 +1,132 @@
+{
+ "versions": {
+  "pymilvus": "3.0.2",
+  "milvus_lite": "3.2.1"
+ },
+ "1_client_open": {
+  "ok": true,
+  "result": {
+   "uri_ok": true
+  }
+ },
+ "2_dense_flat": {
+  "ok": true,
+  "result": {
+   "insert_24k_s": 9.9,
+   "search_p50_ms": 180.2,
+   "search_max_ms": 216.8,
+   "index": "{'index_type': 'AUTOINDEX', 'metric_type': 'COSINE', 'field_name': 'vector', 'index_name': 'vector', 'total_rows': 24000, 'indexed_rows': 24000, 'pending_index_rows': 0, 'state': 'Finished'}"
+  }
+ },
+ "3_sparse_user_vectors": {
+  "ok": true,
+  "result": {
+   "hits": [
+    [
+     [
+      1,
+      2.697,
+      "查询行锁"
+     ],
+     [
+      3,
+      1.438,
+      "锁等待 SQL"
+     ]
+    ]
+   ]
+  }
+ },
+ "4_bm25_function": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=6, message=BM25 function 'bm25' input field 'text' must have enable_analyzer=True)>",
+  "tb": [
+   "  File \"/private/tmp/milvus_spike/venv313/lib/python3.13/site-packages/pymilvus/client/utils.py\", line 77, in check_status",
+   "    raise MilvusException.from_status(status)",
+   "pymilvus.exceptions.MilvusException: <MilvusException: (code=6, message=BM25 function 'bm25' input field 'text' must have enable_analyzer=True)>"
+  ]
+ },
+ "5_bm25_search": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=100, message=collection 'bm25_func' does not exist)>",
+  "tb": [
+   "  File \"/private/tmp/milvus_spike/venv313/lib/python3.13/site-packages/pymilvus/client/utils.py\", line 77, in check_status",
+   "    raise MilvusException.from_status(status)",
+   "pymilvus.exceptions.MilvusException: <MilvusException: (code=100, message=collection 'bm25_func' does not exist)>"
+  ]
+ },
+ "6_bm25_idf_stability": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=100, message=collection 'bm25_func' does not exist)>",
+  "tb": [
+   "  File \"/private/tmp/milvus_spike/venv313/lib/python3.13/site-packages/pymilvus/client/utils.py\", line 77, in check_status",
+   "    raise MilvusException.from_status(status)",
+   "pymilvus.exceptions.MilvusException: <MilvusException: (code=100, message=collection 'bm25_func' does not exist)>"
+  ]
+ },
+ "7_scalar_filter": {
+  "ok": true,
+  "result": {
+   "mode_eq_or_empty": [
+    1,
+    2
+   ],
+   "version_prefix": [
+    1
+   ],
+   "combined": [
+    1,
+    2
+   ]
+  }
+ },
+ "8_data_dir_layout": {
+  "ok": true,
+  "result": {
+   "is_dir": true,
+   "file_count": 15,
+   "total_mb": 184.7,
+   "top": [
+    [
+     "collections/dense_flat/partitions/_default/indexes/data_010001_020000.vector.autoindex.idx",
+     42400442
+    ],
+    [
+     "collections/dense_flat/partitions/_default/indexes/data_000001_010000.vector.autoindex.idx",
+     42400442
+    ],
+    [
+     "collections/dense_flat/partitions/_default/data/data_000001_010000.parquet",
+     41706544
+    ],
+    [
+     "collections/dense_flat/partitions/_default/data/data_010001_020000.parquet",
+     41706453
+    ],
+    [
+     "collections/dense_flat/wal/wal_data_000003.arrow",
+     16513736
+    ],
+    [
+     "collections/filter_test/schema.json",
+     1217
+    ],
+    [
+     "collections/filter_test/wal/wal_data_000001.arrow",
+     1152
+    ],
+    [
+     "collections/sparse_user/schema.json",
+     961
+    ]
+   ]
+  }
+ },
+ "9_multiprocess_lock": {
+  "ok": true,
+  "result": {
+   "rc": 0,
+   "out": "BLOCKED ConnectionConfigException <ConnectionConfigException: (code=1, message=Open local milvus failed)>\nFailed to start MilvusLite server for /tmp/milvus_spike/data.db\nTraceback (most recent call last):\n  File \"/private/tmp/milvus_spike/venv313/lib/python3.13/site-packages/milvus_lite/db.py\", line"
+  }
+ }
+}

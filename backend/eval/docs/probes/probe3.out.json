@@ -1,0 +1,61 @@
+{
+ "1_bm25_literal": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=1, message=JiebaAnalyzer requires the 'jieba' package. Install it with: pip install jieba)>"
+ },
+ "2_bm25_scale_latency": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=1, message=JiebaAnalyzer requires the 'jieba' package. Install it with: pip install jieba)>"
+ },
+ "3_idf_drift": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=100, message=collection 'bm25_scale' does not exist)>"
+ },
+ "4_bm25_filter": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=1, message=JiebaAnalyzer requires the 'jieba' package. Install it with: pip install jieba)>"
+ },
+ "5_builtin_hybrid": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=1, message=JiebaAnalyzer requires the 'jieba' package. Install it with: pip install jieba)>"
+ },
+ "6_dense_latency_clean": {
+  "ok": true,
+  "result": {
+   "FLAT": {
+    "limit=10": {
+     "p50": 22.4,
+     "max": 55.0
+    },
+    "limit=50": {
+     "p50": 24.6,
+     "max": 25.5
+    }
+   },
+   "IVF_FLAT": {
+    "limit=10": {
+     "p50": 7.8,
+     "max": 26.0
+    },
+    "limit=50": {
+     "p50": 10.1,
+     "max": 10.4
+    }
+   },
+   "HNSW": {
+    "limit=10": {
+     "p50": 31.9,
+     "max": 47.8
+    },
+    "limit=50": {
+     "p50": 10.1,
+     "max": 10.3
+    }
+   }
+  }
+ },
+ "7_upsert_delete": {
+  "ok": false,
+  "error": "MilvusException: <MilvusException: (code=1, message=JiebaAnalyzer requires the 'jieba' package. Install it with: pip install jieba)>"
+ }
+}
