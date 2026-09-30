@@ -43,7 +43,8 @@ from app.config import EmbeddingConfig, RetrievalConfig, Settings, load_settings
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+# v2：新增 keywords 列（列权重重排要用它，见 retrieval.COLUMN_WEIGHTS）。
+SCHEMA_VERSION = 2
 
 # ---- ob_chunks 字段名（全项目只在这里定义一次）----
 FIELD_PK = "pk"
@@ -55,6 +56,7 @@ FIELD_KIND = "kind"
 FIELD_PATH = "path"
 FIELD_SECTION = "section"
 FIELD_TITLE = "title"
+FIELD_KEYWORDS = "keywords"
 FIELD_MODE = "mode"
 FIELD_VERSION = "version"
 
@@ -82,6 +84,9 @@ TEXT_MAX_LENGTH = 8000
 PATH_MAX_LENGTH = 512
 SECTION_MAX_LENGTH = 512
 TITLE_MAX_LENGTH = 512
+# 真语料实测 keywords 最长 125 字符（p99 102）。它是正文之外独立的一列，
+# 只用于检索期的列权重重排，不参与 BM25 的 text。
+KEYWORDS_MAX_LENGTH = 512
 MODE_MAX_LENGTH = 16
 VERSION_MAX_LENGTH = 16
 KIND_MAX_LENGTH = 8
@@ -114,6 +119,7 @@ class ChunkRow:
     path: str
     section: str = ""
     title: str = ""
+    keywords: str = ""
     mode: str = ""
     version: str = ""
     content_hash: str = ""
@@ -137,6 +143,7 @@ class ChunkRow:
             FIELD_PATH: self.path,
             FIELD_SECTION: self.section,
             FIELD_TITLE: self.title,
+            FIELD_KEYWORDS: self.keywords,
             FIELD_MODE: self.mode,
             FIELD_VERSION: self.version,
         }
@@ -163,6 +170,7 @@ def chunks_schema(*, dims: int, text_max_length: int = TEXT_MAX_LENGTH) -> Colle
     schema.add_field(FIELD_PATH, DataType.VARCHAR, max_length=PATH_MAX_LENGTH)
     schema.add_field(FIELD_SECTION, DataType.VARCHAR, max_length=SECTION_MAX_LENGTH)
     schema.add_field(FIELD_TITLE, DataType.VARCHAR, max_length=TITLE_MAX_LENGTH)
+    schema.add_field(FIELD_KEYWORDS, DataType.VARCHAR, max_length=KEYWORDS_MAX_LENGTH)
     schema.add_field(FIELD_MODE, DataType.VARCHAR, max_length=MODE_MAX_LENGTH)
     schema.add_field(FIELD_VERSION, DataType.VARCHAR, max_length=VERSION_MAX_LENGTH)
     schema.add_function(
@@ -467,6 +475,33 @@ class MilvusIndex:
         if meta or not created:
             self._check_meta(meta)
         return meta
+
+    def recreate_collections(self, *, rows: int | None = None) -> None:
+        """丢掉 ``ob_chunks``/``ob_meta`` 再按当前 schema 重建（``SCHEMA_VERSION`` 升级用）。
+
+        只在构建流程里、且本轮不需要复用旧向量时调用；调用后 ``ob_meta`` 为空，
+        必须由构建流程重新写入。
+        """
+        client = self.client
+        for name in (self.config.collection, self.config.meta_collection):
+            if name in set(client.list_collections()):
+                client.drop_collection(name)
+                self._loaded.discard(name)
+        client.create_collection(
+            self.config.collection,
+            schema=chunks_schema(dims=self.dims, text_max_length=self.config.max_text_bytes),
+            index_params=chunks_index_params(client, config=self.config, rows=rows),
+        )
+        client.load_collection(self.config.collection)
+        self._loaded.add(self.config.collection)
+        client.create_collection(
+            self.config.meta_collection,
+            schema=meta_schema(),
+            index_params=meta_index_params(client),
+        )
+        client.load_collection(self.config.meta_collection)
+        self._loaded.add(self.config.meta_collection)
+        logger.info("已按 SCHEMA_VERSION=%s 重建集合 %s", SCHEMA_VERSION, self.config.collection)
 
     def read_meta(self) -> dict[str, str]:
         self._ensure_loaded(self.config.meta_collection)

@@ -9,8 +9,9 @@
    小节内的块序号——实测 25077 块里有 1630 组 ``(path, section)`` 重复、单组最多 29 块
    （``配置项/集群级别配置项/index.md`` 的 ``文档明细``），不带 ``seq`` 会在 upsert 时静默丢块。
 3. **两种文本**（关键设计，别合并）：
-   - ``text``（写库、被 BM25 分析）= ``标题×3 + 关键词×2 + 小节 + " | " + 正文``，近似 FTS5
-     四列权重，权重可扫（``TITLE_REPEAT`` / ``KEYWORD_REPEAT``）；
+   - ``text``（写库、被 BM25 分析）= ``标题×TITLE_REPEAT + 关键词×KEYWORD_REPEAT + 小节 + " | " + 正文``，
+     近似 FTS5 四列权重，权重可扫（``TITLE_REPEAT`` / ``KEYWORD_REPEAT``）。另外 ``keywords``
+     还单独存一列，供检索期做列权重重排（``retrieval.COLUMN_WEIGHTS``）；
    - ``canonical``（送 embedding）= ``标题 + 关键词 + 小节 + " | " + 正文``，**不含重复前缀**。
    于是 ``content_hash = sha256(canonical)[:16] + sha256(text)[:16]`` 分成两段：
    ``canonical`` 段相同 → 向量可复用（M6 调权重不必重打 embedding，只重写 BM25 文本）；
@@ -68,8 +69,10 @@ from .milvus_index import (
 
 logger = logging.getLogger(__name__)
 
-#: ``text`` 里标题 / 关键词重复次数（近似 FTS5 的列权重；M6 会扫 ×3/×5、×1/×2）
-TITLE_REPEAT = 3
+#: ``text`` 里标题 / 关键词重复次数（近似 FTS5 的列权重）。
+#: M6 实测：×3/×2 → hit@5 76.5%，×5/×2 → 78.2%（列权重重排 + pool 50），×8/×4 见顶回落，
+#: 故取 ×5/×2；改这两个数会让指纹变，增量构建只重写 BM25 文本、复用向量。
+TITLE_REPEAT = 5
 KEYWORD_REPEAT = 2
 #: ``content_hash`` 的两段长度（canonical / text），合计 32 字符，刚好等于字段宽度
 CANONICAL_HASH_CHARS = 16
@@ -444,8 +447,20 @@ class MilvusBuilder:
         self._prepare_tmp(tmp, live, fresh=mode == MODE_REBUILD_VECTORS)
         index = self._index(tmp)
         try:
-            index.ensure_collections(create=True, rows=len(payloads) or None)
-            reembed = mode == MODE_REBUILD_VECTORS or model_changed
+            schema_reset = False
+            try:
+                index.ensure_collections(create=True, rows=len(payloads) or None)
+            except MilvusSchemaMismatch as exc:
+                # 线上库 schema 与本版不一致（例如 SCHEMA_VERSION 升级）：旧集合没法按新 schema
+                # 增量写，旧向量也不能跨 schema 复用，只能整集重建。
+                if vectors:
+                    raise MilvusUnavailable(
+                        f"{exc}；旧向量不能跨 schema 复用，请加 --rebuild-vectors 重打向量"
+                    ) from exc
+                say(f"线上库 schema 与本版不一致（{exc}）：整集重建成新 schema（本轮不带向量）")
+                index.recreate_collections(rows=len(payloads) or None)
+                schema_reset = True
+            reembed = mode == MODE_REBUILD_VECTORS or model_changed or schema_reset
             existing: dict[int, str] = {}
             if not reembed:
                 existing = self._read_existing(index)
@@ -595,6 +610,7 @@ class MilvusBuilder:
                 path=payload.path,
                 section=payload.section,
                 title=payload.title,
+                keywords=payload.keywords,
                 mode=payload.mode,
                 version=payload.version,
                 content_hash=payload.content_hash,

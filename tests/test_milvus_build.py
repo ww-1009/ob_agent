@@ -13,7 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent import milvus_build as mb
-from app.agent.milvus_index import MilvusIndex, MilvusUnavailable
+from app.agent.milvus_index import (
+    META_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+    MilvusIndex,
+    MilvusUnavailable,
+)
 from app.config import EmbeddingConfig, RetrievalConfig
 
 DIMS = 8
@@ -86,6 +91,42 @@ def read_meta(config: RetrievalConfig, data_dir: Path, *, dims: int = DIMS) -> d
         return index.read_meta()
     finally:
         index.close()
+
+
+def test_rebuild_after_schema_version_bump_recreates_collections(
+    wiki: Path, config: RetrievalConfig
+) -> None:
+    """SCHEMA_VERSION 升级后 ``--rebuild --no-vectors`` 必须整集重建（旧 schema 不能增量写）。"""
+    make_builder(wiki, config).build(mode=mb.MODE_REBUILD, vectors=False)
+    data_dir = config.resolve_milvus_path()
+    index = MilvusIndex(config, dims=DIMS, path_override=data_dir)
+    try:
+        meta = index.read_meta()
+        assert meta[META_SCHEMA_VERSION] == str(SCHEMA_VERSION)
+        meta[META_SCHEMA_VERSION] = "0"  # 假装这是上一版 schema 建出来的库
+        index.write_meta(meta)
+    finally:
+        index.close()
+
+    stats = make_builder(wiki, config).build(mode=mb.MODE_REBUILD, vectors=False)
+    assert stats.skipped == 0 and stats.embedded == 0  # 旧行不能复用，整集重写
+    assert len(read_rows(config, data_dir)) == 3
+    assert read_meta(config, data_dir)[META_SCHEMA_VERSION] == str(SCHEMA_VERSION)
+
+
+def test_schema_bump_with_vectors_requires_rebuild_vectors(wiki: Path, config: RetrievalConfig) -> None:
+    make_builder(wiki, config).build(mode=mb.MODE_REBUILD)
+    data_dir = config.resolve_milvus_path()
+    index = MilvusIndex(config, dims=DIMS, path_override=data_dir)
+    try:
+        meta = index.read_meta()
+        meta[META_SCHEMA_VERSION] = "0"
+        index.write_meta(meta)
+    finally:
+        index.close()
+
+    with pytest.raises(MilvusUnavailable, match="--rebuild-vectors"):
+        make_builder(wiki, config).build(mode=mb.MODE_REBUILD)
 
 
 # ---------------------------------------------------------------- 扫描
@@ -222,7 +263,7 @@ def test_weight_change_rewrites_text_but_reuses_vector(wiki: Path, config: Retri
     before = {pk: row["vector"] for pk, row in read_rows(config, data_dir).items()}
 
     original = mb.TITLE_REPEAT
-    mb.TITLE_REPEAT = 5
+    mb.TITLE_REPEAT = original + 2
     try:
         builder = make_builder(wiki, config)
         stats = builder.build(mode=mb.MODE_INCREMENTAL)
@@ -345,7 +386,7 @@ def test_oversized_chunk_is_truncated_to_max_text_bytes(tmp_path: Path) -> None:
     assert len(payload.text.encode()) <= 8000
     assert len(payload.canonical.encode()) <= 8000
     assert payload.text.endswith("…") and payload.canonical.endswith("…")
-    assert payload.text.startswith("long long long long long long 巨表 | ")  # 加权前缀完整保留，截的是正文尾巴
+    assert payload.text.startswith(" ".join(["long long"] * mb.TITLE_REPEAT + ["巨表"]) + " | ")
 
 
 def test_build_reports_truncated_chunks(wiki: Path, config: RetrievalConfig) -> None:

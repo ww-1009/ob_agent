@@ -17,6 +17,11 @@
 4. **自建 RRF 而不是内建 RRFRanker**：内建 ranker 只接受 pymilvus 的 ``AnnSearchRequest``，
    没法把后置调整插进「各路排序之前」；M3 实测内建 ``RRFRanker`` 与自建 RRF 的 top10 完全
    一致，所以自建没有质量代价。
+5. **列权重重排只在稀疏一路**（``rank_route(column_tokens=...)``）：Milvus 的 BM25 只有
+   ``text`` 一个字段，没有 FTS5 那种 ``bm25(title 10, keywords 6, section 4, body 1)`` 的
+   列权重，靠重复标题也补不回来；检索期用 title/keywords/section/body 四列做一次加权命中
+   并与归一化距离混合，179 条基线 sparse 一路从 70.95% / 0.607 提到 88.27% / 0.768。
+   稠密一路不打列分（保持纯语义排序），要打也必须在两路各自的 rank_route 里打。
 
 条目形状（``path``/``kind``/``section``/``title``/``mode``/``version``/``score``/``snippet``）
 与 FTS5 路径保持一致；``score`` 是 RRF 融合分（越大越好），与 FTS5 的 ``-bm25 + 奖励``
@@ -35,6 +40,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from app.agent.embedding import get_embedding_client
 from app.agent.milvus_index import (
     FIELD_KIND,
+    FIELD_KEYWORDS,
     FIELD_MODE,
     FIELD_PATH,
     FIELD_PK,
@@ -59,6 +65,25 @@ RETRIEVERS = ("sparse", "dense", "hybrid")
 #: 后置调整的归一化基准：FTS5 侧 ``-bm25`` 的典型跨度（179 条基线实测）
 SCORE_SPAN_REFERENCE = 20.0
 
+#: 列权重重排（M6 实测的核心质量来源）。FTS5 的 bm25() 用四列权重
+#: ``(title 10, keywords 6, section 4, body 1)``；Milvus 的 BM25 只有一个 ``text`` 字段，
+#: 靠重复标题（``TITLE_REPEAT``）近似列权重，仍然丢掉了「命中在哪一列」——179 条基线实测
+#: sparse 一路 hit@5 70.95%、MRR 0.607（FTS5 79.33% / 0.706）。补救办法是拿库里的
+#: title/keywords/section/body 四列在**客户端**算一次加权命中，与归一化距离线性混合：
+#: 加这一项后 sparse 一路 88.27% / 0.768，全面超过 FTS5（含 MRR）。
+#: 权重与 FTS5 完全一致，别随手调；``COLUMN_OVERLAP_ALPHA`` 实测 0.5~0.6 是平台（0.3 → 84.4%，
+#: 0.4 → 87.7%，0.5/0.6 → 87.7%，纯重叠 83.8%），取中值。
+COLUMN_WEIGHTS: dict[str, float] = {
+    "title": 10.0,
+    "keywords": 6.0,
+    "section": 4.0,
+    "body": 1.0,
+}
+#: 列权重和：重叠分归一化到 [0,1] 的基准
+COLUMN_SCORE_SPAN = sum(COLUMN_WEIGHTS.values())
+#: 重叠分与「归一化距离 + 后置调整」的混合比例（0 = 只用距离，1 = 只用重叠）
+COLUMN_OVERLAP_ALPHA = 0.5
+
 #: 摘要宽度，与 FTS5 路径的 ``_excerpt`` 默认值一致
 SNIPPET_WIDTH = 220
 
@@ -68,6 +93,7 @@ OUTPUT_FIELDS = (
     FIELD_PATH,
     FIELD_SECTION,
     FIELD_TITLE,
+    FIELD_KEYWORDS,
     FIELD_KIND,
     FIELD_MODE,
     FIELD_VERSION,
@@ -76,6 +102,9 @@ OUTPUT_FIELDS = (
 
 #: Milvus 打不开/索引缺失——都当作可降级错误
 _MILVUS_ERRORS = (MilvusUnavailable, MilvusIndexMissing)
+
+#: jieba 模块（首次 ``_column_tokens`` 时加载）
+_JIEBA: Any = None
 
 
 def _docs():
@@ -105,6 +134,60 @@ def expand_query(query: str) -> str:
     if not aliases:
         return query
     return f"{query} {' '.join(aliases)}"
+
+
+def _column_tokens(query: str) -> list[str]:
+    """列权重重排用的查询词：jieba 分词，丢掉纯标点与单个英文字母。
+
+    为什么是 jieba：Milvus 的 ``text`` 字段用的就是 jieba 分析器，客户端用同一套分词，
+    「查询切出来的词」与「语料索引里的词」才会对齐；FTS5 的 ``_query_tokens``（单字 + 双字）
+    在这里反而不合用——实测拿它做重叠分，hit@5 只有 68.7%，且 literal/mode/version 全面下跌。
+    jieba 首次加载约 0.5s，放在懒加载里（模块 import 时不付这个钱）。
+    """
+    if not query or not query.strip():
+        return []
+    global _JIEBA
+    try:
+        if _JIEBA is None:
+            import jieba  # noqa: PLC0415 - 首次加载约 0.5s，不能拖慢启动
+
+            _JIEBA = jieba
+        words = _JIEBA.lcut(query)
+    except Exception as exc:  # noqa: BLE001 - 分词挂了不该让检索失败
+        logger.warning("jieba 分词失败，跳过列权重重排：%s", exc)
+        return []
+    tokens: list[str] = []
+    for word in words:
+        word = word.strip()
+        if not word:
+            continue
+        if not any(ch.isalnum() or "\u4e00" <= ch <= "\u9fff" for ch in word):
+            continue
+        if word.isascii() and len(word) < 2:
+            continue
+        tokens.append(word)
+    return tokens
+
+
+def column_overlap_score(hit: "Hit", tokens: Sequence[str]) -> float:
+    """一条命中在查询词上的列加权覆盖率（归一化到 [0, 1]，越大越好）。
+
+    一个词可以同时命中多列（标题 + 正文是常见组合），与 FTS5 的 bm25 求和同向；
+    keywords 用 ``elif``——它只是标题的补充信号，重复计分会把关键词堆出来的文档抬过头。
+    """
+    if not tokens:
+        return 0.0
+    total = 0.0
+    for token in tokens:
+        if token in hit.title:
+            total += COLUMN_WEIGHTS["title"]
+        elif token in hit.keywords:
+            total += COLUMN_WEIGHTS["keywords"]
+        if token in hit.section:
+            total += COLUMN_WEIGHTS["section"]
+        if token in hit.body:
+            total += COLUMN_WEIGHTS["body"]
+    return total / COLUMN_SCORE_SPAN
 
 
 def _escape(value: str) -> str:
@@ -144,6 +227,7 @@ class Hit:
     mode: str
     version: str
     body: str
+    keywords: str = ""
     distance: float = 0.0
 
     @classmethod
@@ -161,6 +245,7 @@ class Hit:
             mode=str(entity.get(FIELD_MODE) or ""),
             version=str(entity.get(FIELD_VERSION) or ""),
             body=body,
+            keywords=str(entity.get(FIELD_KEYWORDS) or ""),
             distance=float(hit.get("distance") or 0.0),
         )
 
@@ -199,26 +284,36 @@ def rank_route(
     version_bonus: float = 0.0,
     nav_section_penalty: float = 0.0,
     nav_file_penalty: float = 0.0,
+    column_tokens: Sequence[str] = (),
+    column_alpha: float = COLUMN_OVERLAP_ALPHA,
 ) -> dict[int, int]:
-    """把一路的命中按「归一化距离 + 后置调整」排序，返回 ``pk -> 1 起的名次``。"""
+    """把一路的命中按「归一化距离 + 后置调整」排序，返回 ``pk -> 1 起的名次``。
+
+    ``column_tokens`` 非空时叠加列权重重叠分（见 ``COLUMN_WEIGHTS``）：Milvus 的 BM25
+    丢掉了「命中在哪一列」，这一步把 title/keywords/section/body 的列权重补回来。
+    """
     if not hits:
         return {}
     top = max(h.distance for h in hits)
     bottom = min(h.distance for h in hits)
     span = (top - bottom) or 1.0
-    scored: list[tuple[float, Hit]] = []
+    scored: list[tuple[float, float, Hit]] = []
     for hit in hits:
-        score = (hit.distance - bottom) / span
+        base = (hit.distance - bottom) / span
         if version and hit.version:
-            score += version_bonus / SCORE_SPAN_REFERENCE
+            base += version_bonus / SCORE_SPAN_REFERENCE
         if _docs()._is_navigation_section(hit.section):
-            score -= nav_section_penalty / SCORE_SPAN_REFERENCE
+            base -= nav_section_penalty / SCORE_SPAN_REFERENCE
         if hit.kind == "nav":
-            score -= nav_file_penalty / SCORE_SPAN_REFERENCE
-        scored.append((score, hit))
+            base -= nav_file_penalty / SCORE_SPAN_REFERENCE
+        score = base
+        if column_tokens:
+            overlap = column_overlap_score(hit, column_tokens)
+            score = (1.0 - column_alpha) * base + column_alpha * overlap
+        scored.append((score, base, hit))
     # pk 兜底保证名次稳定（同分时不让顺序取决于 Milvus 的返回次序）
-    scored.sort(key=lambda pair: (-pair[0], pair[1].pk))
-    return {hit.pk: index + 1 for index, (_score, hit) in enumerate(scored)}
+    scored.sort(key=lambda row: (-row[0], -row[1], row[2].pk))
+    return {hit.pk: index + 1 for index, (_score, _base, hit) in enumerate(scored)}
 
 
 def rrf_fuse(
@@ -431,13 +526,20 @@ class MilvusRetriever:
             by_pk.setdefault(hit.pk, hit)
 
         route_ranks: dict[str, dict[int, int]] = {}
+        # 导航文件重降权只在**不显式要清单**时生效（与 FTS5 `_rank` 同口径：include_index=True
+        # 时导航页就是答案本身，不能再扣）。dense 一路恒 kind=="doc"，不受影响。
+        nav_file_penalty = 0.0 if include_index else float(config.nav_file_penalty)
+        # 列权重重排用**原始查询**分词（不是同义词扩展后的串）：扩展只该帮召回，
+        # 不该让「靠别名进来」的文档在列覆盖率上得分。稠密一路保持纯语义排序（不打列分）。
+        column_tokens = _column_tokens(query)
         if sparse_hits:
             route_ranks["sparse"] = rank_route(
                 sparse_hits,
                 version=version,
                 version_bonus=float(config.version_match_bonus),
                 nav_section_penalty=float(config.nav_section_penalty),
-                nav_file_penalty=float(config.nav_file_penalty),
+                nav_file_penalty=nav_file_penalty,
+                column_tokens=column_tokens,
             )
         if dense_hits:
             route_ranks["dense"] = rank_route(
@@ -445,7 +547,7 @@ class MilvusRetriever:
                 version=version,
                 version_bonus=float(config.version_match_bonus),
                 nav_section_penalty=float(config.nav_section_penalty),
-                nav_file_penalty=float(config.nav_file_penalty),
+                nav_file_penalty=nav_file_penalty,
             )
         fused = rrf_fuse(
             [

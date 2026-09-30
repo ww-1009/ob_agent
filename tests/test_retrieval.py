@@ -14,6 +14,7 @@ import pytest
 from app.agent import retrieval as rt
 from app.agent.milvus_index import (
     FIELD_KIND,
+    FIELD_KEYWORDS,
     FIELD_MODE,
     FIELD_PATH,
     FIELD_PK,
@@ -55,6 +56,7 @@ def hit(
     version: str = "",
     mode: str = "",
     body: str = "正文内容",
+    keywords: str = "",
 ) -> dict:
     """造一条 Milvus 形状的命中（``entity`` 里带全部输出字段）。"""
     path = path or f"dir/pk{pk}.md"
@@ -69,6 +71,7 @@ def hit(
             FIELD_KIND: kind,
             FIELD_MODE: mode,
             FIELD_VERSION: version,
+            FIELD_KEYWORDS: keywords,
             FIELD_TEXT: f"标题 标题 标题 | {body}",
         },
     }
@@ -82,6 +85,9 @@ def rhit(
     section: str = "小节",
     version: str = "",
     mode: str = "",
+    title: str = "标题",
+    keywords: str = "",
+    body: str = "正文内容",
 ) -> rt.Hit:
     """造一条 ``Hit``（``rank_route``/``rrf_fuse`` 吃对象而不是 Milvus 原始 dict）。"""
     return rt.Hit(
@@ -89,10 +95,11 @@ def rhit(
         path=f"dir/pk{pk}.md",
         kind=kind,
         section=section,
-        title="标题",
+        title=title,
         mode=mode,
         version=version,
-        body="正文内容",
+        keywords=keywords,
+        body=body,
         distance=distance,
     )
 
@@ -188,6 +195,50 @@ def test_rank_route_prefers_distance_then_adjustments() -> None:
     )
     assert nav[3] == 1 and nav[9] == 4 and nav[1] == 3
     assert rt.rank_route([]) == {}
+
+
+def test_column_tokens_use_jieba_and_drop_noise() -> None:
+    """列权重打分用的查询词：jieba 分词，丢掉标点/空白/单个英文字母。"""
+    tokens = rt._column_tokens("日志流怎么管理？ 用 4.2.5 / x 版本")
+    assert "日志" in tokens and "管理" in tokens
+    assert "？" not in tokens and "/" not in tokens and "x" not in tokens
+    assert rt._column_tokens("   ") == []
+    # 一个词可以同时命中多列（标题 + 正文），keywords 是标题的补充（不叠加）
+    both = rhit(1, 0.1, title="日志流", body="日志流管理正文")
+    assert rt.column_overlap_score(both, ["日志流"]) == pytest.approx(11.0 / rt.COLUMN_SCORE_SPAN)
+    by_keywords = rhit(2, 0.1, title="别的", keywords="日志流", body="")
+    assert rt.column_overlap_score(by_keywords, ["日志流"]) == pytest.approx(6.0 / rt.COLUMN_SCORE_SPAN)
+    by_section = rhit(3, 0.1, title="别的", section="日志流", body="")
+    assert rt.column_overlap_score(by_section, ["日志流"]) == pytest.approx(4.0 / rt.COLUMN_SCORE_SPAN)
+    by_body = rhit(4, 0.1, title="别的", section="别的", body="日志流")
+    assert rt.column_overlap_score(by_body, ["日志流"]) == pytest.approx(1.0 / rt.COLUMN_SCORE_SPAN)
+    assert rt.column_overlap_score(by_body, []) == 0.0
+
+
+def test_rank_route_column_tokens_promote_title_and_keywords_matches() -> None:
+    """列权重重排能翻过距离劣势：标题命中 > 距离压线但不在任何列命中的行（alpha=0.5）。"""
+    hits = [
+        rhit(1, 0.60, title="别的标题", section="别的", body="完全无关的正文"),
+        rhit(2, 0.58, title="日志流管理", section="别的", body="无关正文"),
+        rhit(3, 0.50, title="别的", section="别的", body="完全无关的正文"),
+    ]
+    # 不看列：名次就是距离名次
+    assert list(rt.rank_route(hits)) == [1, 2, 3]
+    ranks = rt.rank_route(hits, column_tokens=["日志流", "管理"])
+    assert ranks[2] == 1 and ranks[1] == 2 and ranks[3] == 3
+    # alpha=0 时退回纯距离
+    assert list(rt.rank_route(hits, column_tokens=["日志流", "管理"], column_alpha=0.0)) == [1, 2, 3]
+    # 没有查询词时不做列打分（稠密一路就是这么调的）
+    assert list(rt.rank_route(hits, column_tokens=[])) == [1, 2, 3]
+
+
+def test_hit_from_entity_reads_keywords_column() -> None:
+    parsed = rt.Hit.from_entity(hit(7, 0.9, keywords="分区表,日志流"))
+    assert parsed.keywords == "分区表,日志流"
+    # 老 schema（没有 keywords 列）取到空串，不报错
+    legacy = hit(8, 0.9)
+    legacy["entity"].pop(FIELD_KEYWORDS)
+    assert rt.Hit.from_entity(legacy).keywords == ""
 
 
 def test_rrf_fuse_math_and_zero_weight() -> None:

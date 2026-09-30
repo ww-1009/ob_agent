@@ -73,10 +73,5 @@ def test_navigation_pages_never_top_body_answers(report):
 
     ``include_index=True`` 的清单类提问是例外——那类问题要的就是目录页。
     """
-    offenders = [
-        f"{row['id']}(top1={row['top1']})"
-        for row in report["cases"]
-        if not row["include_index"]
-        and (row["top1"].endswith("/index.md") or row["top1"].endswith("/README.md"))
-    ]
+    offenders = [f"{row['id']}(top1={row['top1']})" for row in report["nav_top1"]]
     assert not offenders, f"导航页抢了正文答案的第一名: {offenders}"

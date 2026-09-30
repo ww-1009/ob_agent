@@ -35,7 +35,7 @@ pytest 里的门禁（`tests/test_retrieval_eval.py`）就是同一套：语料�
 用例里的 `expect` 是**路径子串**而不是精确文件名：同一个问题往往有几篇都算对
 （MySQL / Oracle 双份文档、总览与分册），判分要认这些。冒烟时用 `--limit N` 只跑前几条。
 
-## 基线（2026-09，5146 篇真语料，179 条用例）
+## 基线（2026-09，5146 篇真语料，179 条用例，FTS5 现状）
 
 ```
 命中率@1  63.69%   命中率@5  79.33%   命中率@10  87.71%   MRR@10  0.706
@@ -67,29 +67,64 @@ Milvus 迁移不沿用旧文档按 50 条用例写的 80%/88%，一律对照本�
 
 | 通道 | 命中率@5 | MRR@10 | 说明 |
 | --- | --- | --- | --- |
-| 现状 FTS5 | ≥0.76 | ≥0.68 | 现有 `--min-recall/--min-mrr` 默认值 |
-| Milvus sparse | ≥0.78 | ≥0.70 | 对照基线 79.33% / 0.706，不退化即可 |
-| Milvus hybrid | ≥0.85 | ≥0.72 | 起步值，M6 实测后再收紧 |
+| 现状 FTS5 | ≥0.76 | ≥0.68 | 现有 `--min-recall/--min-mrr` 默认值；实测 79.33% / 0.706 |
+| Milvus sparse | ≥0.78 | ≥0.70 | 对照基线 79.33% / 0.706，不退化即可；**M6 实测 88.27% / 0.768（通过）** |
+| Milvus hybrid | ≥0.85 | ≥0.72 | 起步值，M6 实测后再收紧（等 embedding 配额） |
 
 外加：`literal` 档退化 ≤1 条（≥19/28）、导航页抢 top1 越界 = 0、故障不得 500（embedding 挂
 只跑稀疏；Milvus 打不开返回空结果 + `retrieval_degraded`；rerank 超时保留融合序）。
 hybrid 的延迟门禁等 Linux 实测后再定（API embedding 单次约 +210ms，旧「hybrid P50 ≤150ms」不可达）。
+
+### M6 实测：Milvus sparse（2026-09，Linux，同一 179 条）
+
+```
+--retriever sparse --max-nav-top1 0
+命中率@1  70.39%   命中率@5  88.27%   命中率@10  92.18%   MRR@10  0.768
+延迟 ms: 均值 86.1 / P50 67.5 / P95 126.3        导航页抢 top1: 0
+by_tag@5: body 91.67% / hard 63.64% / list 45.45% / literal 92.86%(26/28) / mode 100% / nav 100% / version 100%
+```
+
+相对 FTS5 基线：命中率@5 79.33% → 88.27%、MRR 0.706 → 0.768、@10 87.71% → 92.18%，
+`literal` 19/28 → **26/28**，`list` 54.55% → 45.45%（唯一退化的档，见下）。
+延迟 P50 与 FTS5（63.6ms）接近，构建到 25077 块只要 73s（`--no-vectors`）。
+
+做到这一步靠两件事（设计取舍见设计文档 §17）：
+
+1. **客户端列权重重排**：Milvus 内建 BM25 只有一列 `text`（标题/关键词/小节/正文揉在一起），
+   拿不到 FTS5 的列权重。构建时除加权文本外**另存 `keywords` 一列**（`SCHEMA_VERSION=2`），
+   检索期按 FTS5 同口径 `(title 10, keywords 6, section 4, body 1)` 算覆盖率，
+   以 `0.5 * 归一化距离 + 0.5 * 列覆盖率` 重排；**只对稀疏一路**打分（稠密一路只有原文语义，
+   打列分会让向量召回失效），列分用**原始查询**（同义词扩展只帮召回、不参与列分）。
+2. **保留同义词查询扩展**：缺列信号时扩展有害（hit@5 76.5%），补上列分后扩展有益（87.7% → 88.3%）。
+
+`TEXT_MATCH` 过滤这条近路走不通：Milvus Lite 里它是 **OR** 语义（`TEXT_MATCH(text,"日志流 管理")`
+比单词命中还多），`minimum_should_match` 直接语法报错，且带它的一次检索要 **4.8s**。
+
+已知的弱项（M6 实测，属 P2/P3，尚未修）：
+
+- `list` 档 45.45%（5/11）：`include_index=true` 的清单类提问要的是「总览/索引页」，
+  但 45 个无档位用例里也有这类问法；期望文档常只是目录下的普通 doc，列分帮不上。
+- 完全未命中 14 条：`config-overview`、`cluster-resource`、`merge-memory`、`lit-ora-04031`、
+  `list-error-code-cat`、`list-pl-pkg`、`list-config-sysvar`、`list-perf-tuning`、
+  `body-arbitration-intro`、`body-ha-overview`、`body-ls-manage`、`hard-merge-oom`、
+  `hard-drop-table-recover`、`hard-ora-01555-longquery`
+  —— FTS5 的「AND 全词路由」在 Milvus 里没有廉价等价物（见上），长尾精确匹配仍在往下掉。
+- 「命中但排在 5 名之后」7 条（括号内是名次）：`error-code`(10)、`lit-mysql-6002`(9)、
+  `grant`(8)、`list-mysql-views`(8)、`body-mem-tool`(8)、`body-tenant-capacity`(6)、
+  `hard-conn-timeout`(6)。
 
 **延迟必须按「构建 → close → 新进程 reopen 再测」的口径取**：milvus-lite v3 是纯 Python 进程内
 实现，在建索引的那个进程里测会得到约 10x 的伪影（同一目录 26000 行：构建进程内 sparse P50 779ms /
 dense 599ms，reopen 后 109ms / 27ms）。测量期间机器上也不能有别的重活——2 vCPU 上并发两个 Milvus
 进程同样把 P50 从 ~80ms 推到 ~800ms。Linux 权威读数见 `docs/probes/probe7.out.json` 与设计文档 §5.3。
 
-已知的弱项（评测暴露、尚未修，属于 P2/P3 范围）：
+FTS5 基线期的弱项（保留作历史对照，其中 `lock-wait`、`backup-overview`、`lit-ob-query-timeout`
+等在 Milvus sparse + 列权重重排后已进前 5）：
 
 - 错码/范围页这类「一条文档覆盖几百个错误码」的页，字面量查询常被更短的页面挤掉：
-  `lit-ora-04031`、`lit-ob-query-timeout`、`lit-gv-sysstat` 全部未进前 5。
-- `lock-wait`（如何查看锁等待的 SQL）：排在一位的是「热点表最佳实践」，`查询行锁` 排在 10 名外。
-- `backup-overview`（物理备份恢复整体流程）：被「表级恢复概述」抢了先。
+  `lit-ora-04031`（至今仍未命中）、`lit-ob-query-timeout`、`lit-gv-sysstat`。
 - `version-425`（4.2.5 新增特性）：答案《V4.2.5 文档更新记录》输给《版本发布记录》汇总页。
-- `include_index=true` 的清单类提问（`list` 档）命中率只有 54.55%，总览/索引页常被正文挤到 5 名外。
-- 「命中但排在 5 名之后」有 16 条（分区表设计、字符集规范、OBProxy 参数、终止租户会话、
-  若干视图/配置项页），指向长尾查询的排序还不够稳。
+- `list` 档与长尾排序不稳，详见上面的 M6 实测清单。
 
 **改了排序公式、语料或 `SCHEMA_VERSION` 之后**：先跑一次看数字，确认提升再下调阈值；
 如果是有意取舍（某类变好、另一类变差），把两条曲线都写进 PR 说明再调阈值。

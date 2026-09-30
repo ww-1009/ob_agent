@@ -108,6 +108,7 @@ def test_chunks_schema_shape():
         "path",
         "section",
         "title",
+        "keywords",
         "mode",
         "version",
     ]

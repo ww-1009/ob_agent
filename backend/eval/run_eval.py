@@ -43,6 +43,8 @@ DEFAULT_DEEP = 10
 # 改了排序公式、语料或评测集就重新量一遍再调这里。
 DEFAULT_MIN_RECALL = 0.76
 DEFAULT_MIN_MRR = 0.68
+#: 导航页（index.md / README.md）抢 top1 的文件名口径，与 doc_index._NAV_FILENAMES 一致。
+_NAV_FILENAMES = frozenset({"index.md", "readme.md"})
 
 
 @dataclass(frozen=True)
@@ -142,16 +144,21 @@ def run_eval(
     *,
     k: int = DEFAULT_K,
     deep: int = DEFAULT_DEEP,
+    retriever: str = "",
 ) -> dict[str, Any]:
-    """跑一遍评测。``k`` 走生产口径（limit=k），``deep`` 用于 MRR 与「差一点没进前 k」观测。"""
+    """跑一遍评测。``k`` 走生产口径（limit=k），``deep`` 用于 MRR 与「差一点没进前 k」观测。
+
+    ``retriever`` 透传给 ``DocIndex.search``：``""`` = 配置默认（迁移期 fts5），
+    ``sparse`` / ``dense`` / ``hybrid`` 走 Milvus（引擎迁移期三路对照用）。
+    """
     deep = max(deep, k)
     rows: list[dict[str, Any]] = []
     for case in cases:
         kwargs = case.search_kwargs()
         started = time.perf_counter()
-        hits_k = index.search(case.query, limit=k, **kwargs)
+        hits_k = index.search(case.query, limit=k, retriever=retriever, **kwargs)
         latency_ms = (time.perf_counter() - started) * 1000
-        hits_deep = hits_k if deep == k else index.search(case.query, limit=deep, **kwargs)
+        hits_deep = hits_k if deep == k else index.search(case.query, limit=deep, retriever=retriever, **kwargs)
         rank_k, matched_k = match_rank(hits_k, case.expect)
         rank_deep, matched_deep = match_rank(hits_deep, case.expect)
         rows.append(
@@ -178,6 +185,7 @@ def run_eval(
     # MRR 口径：命中取排名倒数，未命中记 0（顺序敏感，衡量「答案够不够靠前」）
     mrr = sum((1.0 / rank) if rank else 0.0 for rank in ranks) / total if total else 0.0
     report: dict[str, Any] = {
+        "retriever": retriever or "default",
         "k": k,
         "deep": deep,
         "count": total,
@@ -193,7 +201,15 @@ def run_eval(
         "cases": rows,
         "misses": [row for row in rows if not row["rank_deep"]],
         "late": [row for row in rows if row["rank_deep"] and row["rank_deep"] > k],
+        # 导航页抢 top1：``include_index=False`` 的提问（要答案不要清单）里，top1 却是
+        # index.md/README.md。这是硬门禁（设计文档 §8.4），不是分数指标。
+        "nav_top1": [
+            {"id": row["id"], "query": row["query"], "top1": row["top1"]}
+            for row in rows
+            if not row["include_index"] and Path(row["top1"]).name.lower() in _NAV_FILENAMES
+        ],
     }
+    report["nav_top1_violations"] = len(report["nav_top1"])
     tags = sorted({row["tag"] for row in rows if row["tag"]})
     if tags:
         report["by_tag"] = {
@@ -212,13 +228,15 @@ def run_eval(
 
 def render(report: dict[str, Any], *, show: int = 8) -> str:
     lines = [
-        f"检索评测: {report['count']} 条用例 (k={report['k']}, deep={report['deep']}, 真语料)",
+        f"检索评测: {report['count']} 条用例 "
+        f"(k={report['k']}, deep={report['deep']}, retriever={report['retriever']}, 真语料)",
         f"  命中率@1  {report['recall_at_1']:.2%}"
         f"   命中率@{report['k']}  {report['hit_at_k']:.2%}"
         f"   命中率@{report['deep']}  {report['hit_at_deep']:.2%}"
         f"   MRR@{report['deep']}  {report['mrr']:.3f}",
         f"  延迟 ms: 均值 {report['latency_ms']['mean']} / P50 {report['latency_ms']['p50']}"
         f" / P95 {report['latency_ms']['p95']}",
+        f"  导航页抢 top1: {report.get('nav_top1_violations', 0)} 条",
     ]
     for tag, stats in (report.get("by_tag") or {}).items():
         lines.append(f"  [{tag}] {stats['count']} 条, 命中率@{report['k']} {stats['hit_at_k']:.2%}")
@@ -242,6 +260,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deep", type=int, default=DEFAULT_DEEP, help="MRR 口径的深度")
     parser.add_argument("--min-recall", type=float, default=DEFAULT_MIN_RECALL, help="命中率@k 门禁")
     parser.add_argument("--min-mrr", type=float, default=DEFAULT_MIN_MRR, help="MRR 门禁")
+    parser.add_argument(
+        "--retriever",
+        default="",
+        choices=["", "fts5", "sparse", "dense", "hybrid"],
+        help="检索引擎（默认取配置 retrieval.default_retriever）",
+    )
+    parser.add_argument("--max-nav-top1", type=int, default=-1, help="导航页抢 top1 的上限（<0 不判）")
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条（排查用）")
     parser.add_argument("--show", type=int, default=8, help="明细里最多列几条")
     parser.add_argument("--json", dest="json_path", default="", help="把完整报告写到该文件")
@@ -270,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         index.ensure(force=True)
 
     started = time.perf_counter()
-    report = run_eval(index, cases, k=args.k, deep=args.deep)
+    report = run_eval(index, cases, k=args.k, deep=args.deep, retriever=args.retriever)
     total_s = time.perf_counter() - started
     report["problems"] = problems
     report["elapsed_s"] = round(total_s, 1)
@@ -278,19 +303,28 @@ def main(argv: list[str] | None = None) -> int:
     print(render(report, show=args.show))
     recall_ok = report["hit_at_k"] >= args.min_recall
     mrr_ok = report["mrr"] >= args.min_mrr
+    nav_ok = args.max_nav_top1 < 0 or report["nav_top1_violations"] <= args.max_nav_top1
+    nav_gate = (
+        f"   导航页抢 top1 {report['nav_top1_violations']} "
+        f"{'<=' if nav_ok else '>'} {args.max_nav_top1} {'✓' if nav_ok else '✗'}"
+        if args.max_nav_top1 >= 0
+        else ""
+    )
     print(
         f"  门禁: 命中率@{args.k} {report['hit_at_k']:.2%} "
         f"{'>=' if recall_ok else '<'} {args.min_recall:.2%} {'✓' if recall_ok else '✗'}"
         f"   MRR {report['mrr']:.3f} "
         f"{'>=' if mrr_ok else '<'} {args.min_mrr:.3f} {'✓' if mrr_ok else '✗'}"
+        f"{nav_gate}"
     )
-    print(f"  {'PASS' if recall_ok and mrr_ok else 'FAIL'}（{total_s:.1f}s）")
+    passed = recall_ok and mrr_ok and nav_ok
+    print(f"  {'PASS' if passed else 'FAIL'}（{total_s:.1f}s，retriever={report['retriever']}）")
 
     if args.json_path:
         Path(args.json_path).write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    return 0 if recall_ok and mrr_ok else 2
+    return 0 if passed else 2
 
 
 if __name__ == "__main__":

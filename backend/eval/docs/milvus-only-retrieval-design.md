@@ -66,7 +66,7 @@
 | --- | --- | --- |
 | 稀疏一路 | SQLite FTS5（自建分词 + 手调常数） | Milvus 内建 BM25（jieba 分词，服务端 IDF） |
 | 分词 | 自写单字+双字预分词 | jieba（Milvus 服务端，且 **Lite 不支持 `run_analyzer` 内省**） |
-| 词权重 | 四列权重 10/6/4/1 | 单 `text` 字段 + **前缀重复近似**（§8.2） |
+| 词权重 | 四列权重 10/6/4/1 | 单 `text` 字段 + 前缀重复近似 + **客户端列权重重排**（M6 定案，§8.4/§17.1） |
 | 同义词 | FTS5 召回路 | **查询扩展**（把同义词追加进 query 文本） |
 | 导航惩罚 / 版本奖励 | `_rank` 内部 | **取回后置调整**（§8.4），常数保留 |
 | 后端可替换 | `VectorIndex` 协议 + `sqlite_numpy` 回退 | 单后端，删除协议与回退（-1.5 人日） |
@@ -228,7 +228,8 @@
 | --- | --- | --- |
 | `pk` | `INT64`（主键） | `xxh64(f"{path}#{section}#{seq}")`——**用身份而非内容做键**，避免"两篇文档有完全相同的段落"被合并成一行。`seq` 是同一 `(path, section)` 内的第几块（0 起）：**必须带**，因为 `_split_chunks` 会把超 1800 字的同一小节切成多块（现有库里实测 1630 组 `(path, section)` 重复、单组最多 29 块），只按 `path#section` 做键会在 upsert 时互相覆盖 |
 | `content_hash` | `VARCHAR(32)` | 嵌入文本的哈希；用于**判断是否需要重新 embedding**（不是主键） |
-| `text` | `VARCHAR(8000)`, `enable_analyzer=True`, `analyzer_params={"type":"jieba"}` | 被 BM25 分析的文本：`{标题(前缀重复)} > {小节} | {正文}`；同时作为 snippet 来源 |
+| `text` | `VARCHAR(8000)`, `enable_analyzer=True`, `analyzer_params={"type":"jieba"}` | 被 BM25 分析的文本：`{标题×TITLE_REPEAT} {关键词×KEYWORD_REPEAT} {小节} \| {正文}`（M6 定案 `TITLE_REPEAT=5`/`KEYWORD_REPEAT=2`）；同时作为 snippet 来源 |
+| `keywords` | `VARCHAR(512)`（M6/`SCHEMA_VERSION=2` 新增） | 真语料实测最长 125 字符；**另存一列**供检索期列权重重排（§8.4），不参与 BM25 |
 | `sparse` | `SPARSE_FLOAT_VECTOR` | **由 BM25 Function 自动生成**，不手工写入 |
 | `vector` | `FLOAT_VECTOR(1024)` | 稠密向量（embedding 模型维度，需与 `ob_meta.dims` 一致） |
 | `path` / `section` / `title` | `VARCHAR` | 结果回传与 `read_doc` 对齐 |
@@ -360,7 +361,7 @@ python -m app.agent.milvus_index --help               # --limit N / --wiki-dir D
 
 1. 扫描 `backend/doc/ob_wiki` → 解析 frontmatter → `_split_chunks`（**沿用现有实现**，39 行不动）。
 2. 生成 `pk = xxh64(path#section#seq)` 与 `content_hash`（基于最终 `text`）；`seq` 为同一小节内的块序号（见 §5.1）。
-3. **增量判定**：用 `query_iterator` 扫全库拿 `pk → content_hash`（扫全库才能发现已删除文件的待剪枝 pk）；只对「新增」或「哈希变化」的块调用 embedding；未变的块**跳过费用**。`content_hash` = `sha256(canonical)[:16] + sha256(text)[:16]`——canonical 不含加权前缀，所以 M6 调 `TITLE_REPEAT`/`KEYWORD_REPEAT` 时只重写 `text` 并**复用旧向量**（构建指纹里带 `:t3k2` 权重签名，让这种情况不会误走整库短路）；`embedding_model` 变了则整库重打向量。
+3. **增量判定**：用 `query_iterator` 扫全库拿 `pk → content_hash`（扫全库才能发现已删除文件的待剪枝 pk）；只对「新增」或「哈希变化」的块调用 embedding；未变的块**跳过费用**。`content_hash` = `sha256(canonical)[:16] + sha256(text)[:16]`——canonical 不含加权前缀，所以 M6 调 `TITLE_REPEAT`/`KEYWORD_REPEAT` 时只重写 `text` 并**复用旧向量**（构建指纹里带 `:t5k2` 权重签名，让这种情况不会误走整库短路）；`embedding_model` 变了则整库重打向量。
 4. 组装行：`text` = `{标题前缀重复} > {小节} | {正文}`（§8.2 的权重复刻），`text` 与 `vector` 一起 `upsert`。
    - **超长块截断（M4 实测必须）**：`_split_chunks` 对**没有 H2/H3 的文件**走「`h1 or 正文` 整篇一块」兜底，绕过了 1800 字切分——真语料里有 6 篇这样的文件（8k–40k 字，`obshell/错误码.md` 最大 40363 字），Milvus 直接 `code=6, VARCHAR field 'text' value length 16189 exceeds max_length=8000` 拒收，embedding 也会超模型输入上限。构建侧按 `retrieval.max_text_bytes`（默认 8000 **字节**，比 schema 的字符上限保守）截断并补 `…`，`BuildStats.truncated` 记账。**给 M6/M7 的遗留项**：根治办法是让 `_split_chunks` 的兜底路径也走 1800 字硬切，但那会改变 FTS5 的召回结果、让已测的 179 条基线不可比，因此留到 M7 删 FTS5 之后再做。
 5. **剪枝**：删除本次不再存在的 `pk`（文件被删/小节改名）：`delete(filter="pk in [...]")` 分批执行。
@@ -407,10 +408,10 @@ def _sparse_rank(self, query, *, mode, version, include_index, pool_k):
 **四列权重的复刻（近似）**：BM25 只分析一个字段，因此把标题与关键词**重复写入 `text` 前缀**来近似加权：
 
 ```
-text = (标题 ×3) + " " + (关键词 ×2) + " " + 小节 + " | " + 正文
+text = (标题 ×TITLE_REPEAT=5) + " " + (关键词 ×KEYWORD_REPEAT=2) + " " + 小节 + " | " + 正文
 ```
 
-> 这是**近似而非等价**：BM25 的 `tf` 饱和（`k1`）会让重复 3 次的实际权重远小于 3×。**必须用评测确认**，`literal` 门禁是硬约束（§11.4）。若近似不足，备选是"自建稀疏向量"（探针已验证可用，见 §3.2），由我们在客户端算 `tf`/`idf` 以精确复刻权重——**代价是自行维护 df 统计**。
+> 这是**近似而非等价**：BM25 的 `tf` 饱和（`k1`）会让重复 5 次的实际权重远小于 5×。M6 实测表明**只靠前缀重复补不上列权重**（sparse 最好 78.21%/0.665），因此 M6 追加**客户端列权重重排**（§8.4，`keywords` 另存一列）才把 sparse 抬到 88.27%/0.768；前缀重复保留（对 BM25 召回仍有正收益，×5/×2 最优），自建稀疏向量备选未启用（§17.1）。
 
 **同义词**：原 FTS5 里同义词参与召回路径与惩罚计算，v2 改为**查询扩展**（把同义词词面追加进 `q_text`），`SYNONYM_PENALTY` 常数随之不再适用（删除）。
 
@@ -440,7 +441,7 @@ FTS5 删除后，以下常数没有落点了，改为**取回结果后调整分�
 | `VERSION_MATCH_BONUS=8.0` | 版本命中奖励 | 两路内部 `score += 8`（`_version_ok` 判定，**保留**） |
 | `AND_ALL_TERMS_BONUS=10.0` | 全词命中奖励 | **删除**：jieba 下"全词"概念不同，且 BM25 已按词项匹配打分 |
 | `SYNONYM_PENALTY=10.0` | 同义词惩罚 | **删除**（同义词改为查询扩展，不再需要惩罚） |
-| `_BM25_WEIGHTS=(10,6,4,1)` | 四列权重 | **近似复刻**（§8.2 前缀重复） |
+| `_BM25_WEIGHTS=(10,6,4,1)` | 四列权重 | **客户端列权重重排复刻**（M6 定案，**取代**前缀重复近似）：前缀重复只做加权的粗近似，真正的列权重改为 `title 10 / keywords 6 / section 4 / body 1` 的 jieba 查询词覆盖率，`score = 0.5*归一化距离 + 0.5*列覆盖率`，**只作用于稀疏一路**。`keywords` 在构建时另存一列（`SCHEMA_VERSION=2`）；列分用**原始查询**（同义词扩展只帮召回）。见 §17.1「列权重」 |
 
 - **导航惩罚全局只扣一次**：两路内部各扣一次之后，融合结果上**不再重复扣**（用与 v1 相同的 `nav_penalty_done` 标志）。
 - 注意：这里调整的是**分数**，而 RRF 只用**排名**。因此调优发生在"进入 RRF 之前"的每路排序上——两路各自 `score` 调整后重新排序，再取 rank。语义与 v1 一致。
@@ -477,6 +478,8 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 | 降级 | 抛 `VectorUnavailable` | **一律不抛**，返回 `RetrievalResult(degraded=...)`：`milvus_index_missing` / `milvus_unavailable` / `dense_unavailable`；hybrid 在 embedding 失败时保留稀疏一路的结果 |
 | 查询扩展 | `_expand_synonyms` | `expand_query()` 只作用于**稀疏**一路（稠密嵌原始 query，扩展会污染向量语义） |
 | 单例 | — | `get_retriever()/reset_retriever()`：embedding 的 LRU 挂在实例上，必须跨请求复用；`doc_index._search_milvus` 拿它并 catch 全部异常 → `[]` |
+| 列权重重排（M6 新增） | 无（原以为前缀重复够用） | `rank_route(..., column_tokens=..., column_alpha=0.5)`：`column_overlap_score()` 按 `title 10 / keywords 6 / section 4 / body 1` 算 jieba 查询词覆盖率 `/21`，`score = (1-alpha)*归一化距离 + alpha*覆盖率`，排序键 `(-score, -base, pk)`；`_column_tokens()` 懒加载 jieba 并缓存（词表失败只 warning → 空 tokens）；**只传给稀疏一路**，dense 不传。实测 70.95%/0.607 → 88.27%/0.768 |
+| 导航文件惩罚（M6 修） | 稀疏一路恒 `-40` | `nav_file_penalty = 0.0 if include_index else config.nav_file_penalty`：FTS5 在 `include_index=True` 时**整条导航文件路由都不跑**，v2 必须同口径（否则清单类提问的导航页被压下去） |
 
 - `RetrievalResult` 账本：`entries / degraded / retriever / pool / sparse_ms / dense_ms / embed_ms / elapsed_ms`；`pool` **只为本次会跑的路预置键**（提前返回时也是 `{"dense": 0}` 而非缺键）。
 - 条目诊断字段 `sources`（`"dense+sparse"`）/`sparse_rank`/`dense_rank` 在 `doc_index._finalize` **之前**写入，`limit` 截断不会丢诊断。
@@ -556,8 +559,8 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 
 ### 11.4 七道门禁
 
-1. `hybrid` hit@5 ≥ 88%、MRR@10 ≥ 0.78（T1 校准）；
-2. `sparse` 不劣于新基线；
+1. `hybrid` hit@5 ≥ 88%、MRR@10 ≥ 0.78（T1 校准；M6 把 sparse 实测 88.27%/0.768 作为它的下界参考）；
+2. `sparse` 不劣于新基线（**M6 实测 88.27%/0.768，对照 FTS5 79.33%/0.706：通过**）；
 3. `by_tag.literal` 不劣化（相对劣化 ≤1 条）；
 4. 导航页不得被顶到正文之前（`test_navigation_pages_never_top_body_answers` 重写后仍须通过）；
 5. `bm25` 路径的 `no-500` 降级断言（embedding 注入超时）；
@@ -573,10 +576,10 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 | 项 | 值 |
 | --- | --- |
 | 块数 | 25077（23995 doc 嵌入；1082 nav 不嵌入） |
-| embedding 请求 | 23995 / batch 64 ≈ 375 次（并发 4） |
-| embedding token | 中文约 6–8M token（`text` 现已含标题前缀重复，比 v1 略增） |
-| 时间 | 自建端点约 10–30 分钟；托管 API 约 3–10 分钟；**Milvus 写入本身仅 32.3 s** |
-| 增量 | 按 `content_hash` 跳过未变块；典型改一篇文档 → 个位数请求 |
+| embedding 请求 | 23995 / batch 16 ≈ **1500 次**（`embedding.batch_size=16`；构建侧每 256 块成组再交给客户端分批） |
+| embedding token | 约 **9M token**（canonical 文本 18M 字符，中文 ≈0.5 token/字；`text` 另含 `t5k2` 加权前缀，不参与嵌入） |
+| 时间 | **`--no-vectors` 全量 66–73 s**（真实向量未跑完：M6 在 45 s 处撞 Aliyun 端点 429 配额，需提额或放慢重建） |
+| 增量 | 按 `content_hash` 跳过未变块；典型改一篇文档 → 个位数请求；仅改权重常数 → 只重写 `text`、复用全部向量 |
 
 ### 12.2 查询延迟（25k 规模实测）
 
@@ -664,7 +667,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 
 **执行顺序**：T0 → T1 → **P2a（R1–R3）** → P2b（T2–T7）。理由见 v1 附录 E（实测缺口比例 8:2，重排杠杆大于扩召回），该结论与引擎选择无关，**在 v2 中依然成立**。
 
-**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ 进行中 / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）/ M8 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）。
+**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ `e929ab2`（含指纹 TTL 缓存 + `_default_retriever` 进程内缓存） / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ **稀疏通道已过门禁**（sparse 88.27%/0.768、导航抢 top1 = 0、literal 26/28、P50 67.5ms，`SCHEMA_VERSION=2` + 列权重重排）；dense/hybrid 仍被 embedding 429 配额拦住（全量真实向量 ≈9M tokens） / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）/ M8 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）。
 
 > **与 v1 的工作量差异**：v1 17.5 d → v2 17.0 d。删掉 `sqlite_numpy` 与双后端一致性测试省 1.5 d；新增 FTS5 删除（337 行）与测试重写多花约 1.0 d。
 
@@ -680,7 +683,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 | 4 | **依赖 +359 MB、data_dir 240 MB** | 与"轻量离线演示"气质冲突；镜像/CI 变重 | 高 | 缓存 wheel 与 data_dir artifact；镜像分层；README 明确体积 |
 | 5 | **单进程文件锁 + gRPC fork 警告** | 多 worker / `--reload` 直接失败 | 中 | 启动校验 + 明确报错；文档写明 `--workers 1`、禁 preload/reload |
 | 6 | 稀疏一路延迟 0.3 ms → 6–14 ms | 端到端变慢 | 低 | 绝对量仍 <20 ms；指纹（51.3 ms）才是瓶颈，由 T0 解决 |
-| 7 | 四列权重只能"前缀重复"近似 | BM25 排序质量不及 FTS5 调优结果 | 中 | 评测校准；`literal` 门禁兜底；备选自建稀疏向量 |
+| 7 | 四列权重只能"前缀重复"近似 | BM25 排序质量不及 FTS5 调优结果 | 中 | **已缓解（M6）**：前缀重复确实不够（最好 78.21%/0.665），改用「`keywords` 另存一列 + 客户端列权重重排」后 sparse 88.27%/0.768 反超 FTS5，`literal` 26/28；自建稀疏向量备选未启用 |
 | 8 | IDF 段内统计（探针未复现，但证据弱） | 分数随写入漂移 → 门禁不稳 | 低 | T1 用真语料复测（追加写入前后比对分数）；若有漂移改为定期重建 |
 | 9 | `run_analyzer` 不可用 → 分词黑盒 | 分词问题只能靠检索结果反推 | 低 | 建立"分词行为快照"测试：固定 query 集合的命中结果作为回归基线 |
 | 10 | data_dir 查询后从 218 → 239 MB | 磁盘缓慢增长 | 低 | 观察 compaction 是否回落；必要时定期 `--rebuild` |
@@ -706,11 +709,14 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 | 导航页处置 | `include_index=False` 时过滤式**整行排除**（不是只扣 40 分）；`include_index=True` 才放行 nav 行并扣 40 |
 | 同义词（原 §17.2-3） | **等权查询扩展**（只作用于稀疏一路），不做分组加权 |
 | 元数据落点（原 §17.2-4） | **`ob_meta` 集合**（M3/M4 已落地）：与块同库同事务语义，目录级原子切换天然一致 |
+| 列权重（原 §17.2-1） | **客户端列权重重排**（M6 实测选定）：M6 之前内建 BM25 只有一列 `text`，无论如何调前缀重复次数都补不上 FTS5 的列权重（sparse 最好只有 78.21%/0.665）。改为「前缀加权文本 + 另存 `keywords` 列（`SCHEMA_VERSION=2`）」，检索期按 FTS5 同口径 `(title 10, keywords 6, section 4, body 1)` 算 jieba 查询词覆盖率，`score = 0.5*归一化距离 + 0.5*列覆盖率`；**只作用于稀疏一路**（稠密一路无列信号）、列分用**原始查询**（扩展只帮召回）。前缀重复次数定为 **`TITLE_REPEAT=5` / `KEYWORD_REPEAT=2`**（×3/×2 76.5%、×5/×2 78.2%、×8/×4 见顶回落），并计入构建指纹（改权重→只重写文本、复用向量）。实测 sparse 88.27%/0.768（FTS5 79.33%/0.706），故不改用自建稀疏向量 |
+| `TEXT_MATCH` 作为「AND 全词路由」 | **不可用、放弃**：Milvus Lite 里 `TEXT_MATCH` 是 OR 语义（`TEXT_MATCH(text,"日志流 管理")` 命中 378 行 > 单词 110 行），`minimum_should_match` 与 `{"query_type":"match_all"}` 都是语法错误，且带该过滤的一次稀疏检索要 **4.758s**（`count` 2.7–3.4s）。FTS5 的 AND 全词路由在 Milvus Lite 里没有廉价等价物，长尾精确匹配的退化（14 条未命中）记为已知弱项 |
+| 同义词查询扩展（M6 复核） | **保留**：M6 扫权重时一度测出「关掉扩展更好」（缺列信号所致，76.5% vs 76.5% 上下）；补上列权重重排后扩展是正收益（87.71% → 88.27%、MRR 0.763 → 0.768），故保留等权扩展 |
+| `SCHEMA_VERSION` 升级路径 | **`--rebuild --no-vectors` 整集重建**；带向量时必须 `--rebuild-vectors`（旧向量不能跨 schema 复用，`MilvusIndex.recreate_collections` 负责丢集重建）。`live` 库的 meta 版本不一致时 `_live_meta()` 返回 `None`、构建流程捕获 `MilvusSchemaMismatch` 走重建分支 |
 
 ### 17.2 待定
 
-1. **四列权重的近似方式**：前缀重复次数（标题 ×3？×5？）需 T1/M6 评测校准；若近似不足，是否改用"自建稀疏向量"（已验证可用）。
-2. **版本命中奖励与距离归一化的定量关系**：`SCORE_SPAN_REFERENCE=20.0` 是拍的标尺，M6 用真数据回看是否要按路自适应（见 §8.7）。
+1. **版本命中奖励与距离归一化的定量关系**：`SCORE_SPAN_REFERENCE=20.0` 是拍的标尺，M6 用真数据回看是否要按路自适应（见 §8.7）。M6 的结论是**先不动**：列权重重排已把 sparse 抬到门禁之上，`SCORE_SPAN_REFERENCE` 只在 hybrid 的稠密一路起作用，等 hybrid 实测（embedding 配额恢复后）再回看。
 5. **是否保留 FTS5 代码在分支/tag**：影响回滚手段（§14.3）。
 6. **CI 是否安装完整 Milvus 依赖**，还是只用缓存的 data_dir artifact 跑检索测试。
 7. **`milvus-lite` 版本 pin 策略**：3.x Beta，是否 pin 到 patch 版本。
