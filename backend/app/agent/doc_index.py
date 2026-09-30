@@ -66,6 +66,8 @@ MAX_CHUNKS_PER_PATH = 2
 # 而语料在一个 TTL 窗口内几乎不会变。代价是窗口内的改动最迟 TTL 后生效。
 # 0 = 关闭缓存（每次重扫，测试与「必须立刻看到改动」的场景用）。
 DEFAULT_FINGERPRINT_TTL = 5.0
+#: 迁移期默认检索引擎：M7 摘掉 FTS5 后把 config 默认值改成 hybrid
+DEFAULT_RETRIEVER = "fts5"
 # bm25 列权重：标题 > 关键词 > 小节名 > 正文
 _BM25_WEIGHTS = (10.0, 6.0, 4.0, 1.0)
 
@@ -283,6 +285,8 @@ class DocIndex:
         self._con: sqlite3.Connection | None = None
         # (指纹, 计算时刻 monotonic, 当时 wiki 目录 mtime_ns)
         self._fp_cache: tuple[tuple[int, int, int], float, int] | None = None
+        # 最近一次 Milvus 检索的账本（degraded/pool/耗时），M8 报告与排查用
+        self.last_retrieval: Any = None
 
     # ---- 路径 ----
 
@@ -492,28 +496,93 @@ class DocIndex:
         mode: str = "",
         version: str = "",
         include_index: bool = False,
+        retriever: str = "",
     ) -> list[dict[str, Any]]:
         """检索文档小节。
 
         ``include_index=True`` 让导航页（``index.md`` / ``README.md``）按正常排序参与，适合
         「有哪些 / 包含哪些 / 怎么分类」这类要清单的提问；默认只把它们放在重降权的位置。
+
+        ``retriever`` 选引擎：``""`` 用配置 ``retrieval.default_retriever``（迁移期是 ``fts5``）；
+        ``sparse`` / ``dense`` / ``hybrid`` 走 Milvus（``app.agent.retrieval``）。两条路返回的
+        条目形状一致，迁移期并存，见设计文档 §8.1。
         """
-        tokens = _query_tokens(query)
-        if not tokens:
+        if not query or not query.strip():
             raise DocIndexError("query 不能为空")
+        engine = (retriever or _default_retriever()).strip().lower()
         limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
-        self.ensure()
         # 提问里自带模式/版本时自动消歧（文档库有 MySQL/Oracle 双份同名文档，混着答会答错）。
         # 只当提问**明确写了**才过滤，且过滤后若一条不剩就退回不过滤的检索。
         auto_mode = "" if mode else _detect_mode(query)
         found = None if version else _VERSION.search(query)
         auto_version = found.group(1) if found else ""
         use_mode, use_version = mode or auto_mode, version or auto_version
+        if engine and engine != "fts5":
+            return self._search_milvus(
+                query,
+                engine,
+                limit=limit,
+                mode=use_mode,
+                version=use_version,
+                auto_mode=auto_mode,
+                auto_version=auto_version,
+                include_index=include_index,
+            )
+        tokens = _query_tokens(query)
+        if not tokens:
+            raise DocIndexError("query 不能为空")
+        self.ensure()
         with self._lock:
             entries = self._rank(tokens, query, limit, use_mode, use_version, include_index)
             if not entries and (auto_mode or auto_version):
                 entries = self._rank(tokens, query, limit, mode, version, include_index)
         return _finalize(entries, limit, prefix=self.wiki_dirname)
+
+    def _search_milvus(
+        self,
+        query: str,
+        engine: str,
+        *,
+        limit: int,
+        mode: str,
+        version: str,
+        auto_mode: str,
+        auto_version: str,
+        include_index: bool,
+    ) -> list[dict[str, Any]]:
+        """Milvus 三路检索：降级只记日志、返回已有结果，任何意外都不下发成 500。"""
+        from app.agent import retrieval as retrieval_module
+
+        self.last_retrieval = None
+        try:
+            retriever = retrieval_module.get_retriever()
+            result = retriever.search(
+                query,
+                limit=limit,
+                mode=mode,
+                version=version,
+                include_index=include_index,
+                retriever=engine,
+            )
+            if not result.entries and (auto_mode or auto_version):
+                # 与 FTS5 路径同口径：自动消歧后一条不剩就退回不过滤
+                retry = retriever.search(
+                    query,
+                    limit=limit,
+                    include_index=include_index,
+                    retriever=engine,
+                )
+                if retry.entries:
+                    result = retry
+        except Exception as exc:  # noqa: BLE001 - 检索层意外不该变成 500
+            logger.warning("Milvus 检索失败（retriever=%s）：%s", engine, exc)
+            return []
+        self.last_retrieval = result
+        if result.degraded:
+            logger.warning(
+                "检索降级（retriever=%s）：%s", engine, {k: v for k, v in result.as_dict().items() if k != "entries"}
+            )
+        return result.entries
 
     def _rank(
         self,
@@ -754,6 +823,27 @@ def _finalize(entries: list[dict[str, Any]], limit: int, *, prefix: str = WIKI_D
 
 _default_lock = threading.Lock()
 _default: DocIndex | None = None
+
+#: ``_default_retriever()`` 的结果按进程缓存：``load_settings()`` 实测 ~5.8 ms/次
+#: （重读 .env + 解析 config.yaml），放在每次检索的路径上等于给每问加 5.8 ms。
+_default_retriever_cache: str | None = None
+
+
+def _default_retriever() -> str:
+    """配置 ``retrieval.default_retriever``；读不到就退回 ``DEFAULT_RETRIEVER``（迁移期 fts5）。
+
+    进程内只读一次：引擎选择在启动后不该漂移（改配置 = 重启，与其它配置项同口径）。
+    """
+    global _default_retriever_cache
+    if _default_retriever_cache is None:
+        try:
+            from app.config import load_settings
+
+            value = str(load_settings().retrieval.default_retriever or DEFAULT_RETRIEVER)
+        except Exception:  # 配置缺失/非法都不该让检索起不来
+            value = DEFAULT_RETRIEVER
+        _default_retriever_cache = value
+    return _default_retriever_cache
 
 
 def _configured_fingerprint_ttl() -> float:

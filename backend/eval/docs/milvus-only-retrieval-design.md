@@ -465,6 +465,24 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 | 超时/失败 | `rerank.timeout_seconds=2` → **保留融合顺序**，`/api/health` 标 `rerank_degraded` |
 | 每篇上限与截断 | `MAX_CHUNKS_PER_PATH=2` 与 `limit` 截断**在 rerank 之后** |
 
+### 8.7 M5 实现落点（as-built，与 §8.2–§8.5 伪码的差异）
+
+实现文件 `backend/app/agent/retrieval.py`（503 行）+ `doc_index.py` 的 `retriever=` 路由。§8.2–§8.5 是设计伪码，以下为落地差异，**冲突处以本节为准**：
+
+| 项 | 设计伪码 | 落地实现 |
+| --- | --- | --- |
+| 导航行 | 只扣 `-40` 分 | `include_index=False` 时过滤式 `kind == "doc"` **整行排除**：RRF 只看名次，pool 小的时候降权不足以保证"导航页不抢 top1"这条硬门禁。`include_index=True` → `kind in ["doc","nav"]` 并对 `kind=='nav'` 行扣 `-40`（不再用 `nav_penalty_done` 标志，融合前每路各扣一次） |
+| 分数调整 | 直接 `score ± 常数` | 每路 pool 内**距离先线性归一化到 [0,1]**（`SCORE_SPAN_REFERENCE=20.0` 为标尺），再 `+8/20`、`-12/20`、`-40/20`：BM25 实测 8–23 与 COSINE 0.5 差一个数量级，不归一化则稠密路的版本奖励等价于无差别置顶 |
+| 版本奖励判定 | `score += 8` | 与 FTS5 `doc_index._entry:789` 逐字同口径：`if version and row["version"]`（查询未给版本则不给奖励） |
+| 降级 | 抛 `VectorUnavailable` | **一律不抛**，返回 `RetrievalResult(degraded=...)`：`milvus_index_missing` / `milvus_unavailable` / `dense_unavailable`；hybrid 在 embedding 失败时保留稀疏一路的结果 |
+| 查询扩展 | `_expand_synonyms` | `expand_query()` 只作用于**稀疏**一路（稠密嵌原始 query，扩展会污染向量语义） |
+| 单例 | — | `get_retriever()/reset_retriever()`：embedding 的 LRU 挂在实例上，必须跨请求复用；`doc_index._search_milvus` 拿它并 catch 全部异常 → `[]` |
+
+- `RetrievalResult` 账本：`entries / degraded / retriever / pool / sparse_ms / dense_ms / embed_ms / elapsed_ms`；`pool` **只为本次会跑的路预置键**（提前返回时也是 `{"dense": 0}` 而非缺键）。
+- 条目诊断字段 `sources`（`"dense+sparse"`）/`sparse_rank`/`dense_rank` 在 `doc_index._finalize` **之前**写入，`limit` 截断不会丢诊断。
+- `score` 是 RRF 分（数量级 `1/60`），**与 FTS5 的 BM25 分不可比**；评测器只比 hit/MRR 不比分数。
+- 已知语义差异（M6 评测口径要注意）：FTS5 对导航页只降权不排除，`include_index=False` 下仍可能召回（如 `"事务隔离级别"` 会带上 `index.md`），Milvus 路直接排除；两边靠门禁（导航页不抢 top1）对齐而非逐条一致。
+
 ---
 
 ## 9. 删除清单与新增清单
@@ -646,6 +664,8 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 
 **执行顺序**：T0 → T1 → **P2a（R1–R3）** → P2b（T2–T7）。理由见 v1 附录 E（实测缺口比例 8:2，重排杠杆大于扩召回），该结论与引擎选择无关，**在 v2 中依然成立**。
 
+**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ 进行中 / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）/ M8 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）。
+
 > **与 v1 的工作量差异**：v1 17.5 d → v2 17.0 d。删掉 `sqlite_numpy` 与双后端一致性测试省 1.5 d；新增 FTS5 删除（337 行）与测试重写多花约 1.0 d。
 
 ---
@@ -682,13 +702,15 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 | 稠密索引类型 | **`IVF_FLAT` + COSINE（nlist=128）** |
 | rerank 形态 | **API、默认 `auto`、不做本地 ONNX**（沿用 v1） |
 | 执行顺序 | T0 → T1 → P2a → P2b（沿用 v1） |
+| 融合（原 §17.2-1） | **自研 RRF**（`rrf_fuse`），内建 `RRFRanker` 只作备选：需要在每路内部做 §8.4 的后置调整 |
+| 导航页处置 | `include_index=False` 时过滤式**整行排除**（不是只扣 40 分）；`include_index=True` 才放行 nav 行并扣 40 |
+| 同义词（原 §17.2-3） | **等权查询扩展**（只作用于稀疏一路），不做分组加权 |
+| 元数据落点（原 §17.2-4） | **`ob_meta` 集合**（M3/M4 已落地）：与块同库同事务语义，目录级原子切换天然一致 |
 
 ### 17.2 待定
 
-1. **融合用自研 RRF 还是内建 `RRFRanker`**：实测内建 hybrid 单次往返 P50 20.8 ms，自研两路分查约 30–35 ms（多一次往返，但可在每路内部做 §8.4 的分数调整）。**推荐自研**，除非延迟成为问题。
-2. **四列权重的近似方式**：前缀重复次数（标题 ×3？×5？）需 T1 评测校准；若近似不足，是否改用"自建稀疏向量"（已验证可用）。
-3. **27 组同义词表**的处置：改为查询扩展后，是否需要按词表分组给不同权重。
-4. **`ob_meta` 还是 data_dir 旁 `meta.json`**：前者一致性好，后者少一个集合、读取更快。
+1. **四列权重的近似方式**：前缀重复次数（标题 ×3？×5？）需 T1/M6 评测校准；若近似不足，是否改用"自建稀疏向量"（已验证可用）。
+2. **版本命中奖励与距离归一化的定量关系**：`SCORE_SPAN_REFERENCE=20.0` 是拍的标尺，M6 用真数据回看是否要按路自适应（见 §8.7）。
 5. **是否保留 FTS5 代码在分支/tag**：影响回滚手段（§14.3）。
 6. **CI 是否安装完整 Milvus 依赖**，还是只用缓存的 data_dir artifact 跑检索测试。
 7. **`milvus-lite` 版本 pin 策略**：3.x Beta，是否 pin 到 patch 版本。
