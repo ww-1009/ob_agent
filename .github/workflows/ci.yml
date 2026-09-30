@@ -3,7 +3,8 @@ name: CI
 # 三通道（设计文档 §11.3）：
 #   A backend        每 PR，sparse + 无重排：新基线零回归、by_tag.literal 不劣化、导航页门禁。
 #   B hybrid         每 PR，hybrid + 无重排：质量门禁；向量库走 actions/cache（由夜检预热）。
-#   C retrieval-nightly  定时/手动，hybrid + API 重排：hit@1 门禁；需要 embedding 与 rerank 密钥。
+#   C retrieval-nightly  定时/手动，sparse 与 hybrid 各跑一遍 API 重排：命中率@1 门禁；
+#                        需要 embedding 与 rerank 密钥（含各自的 BASE_URL / MODEL）。
 # A 不需要任何密钥（稀疏索引纯本地构建）；B 没命中缓存时明确跳过而不是假绿。
 on:
   push:
@@ -123,7 +124,7 @@ jobs:
           if-no-files-found: ignore
 
   retrieval-nightly:
-    name: 检索夜检（通道 C：hybrid + API 重排）
+    name: 检索夜检（通道 C：sparse/hybrid + API 重排）
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -145,15 +146,24 @@ jobs:
 
       # 仓库是公开的：fork 的 PR 拿不到密钥，但 schedule/dispatch 在默认分支上跑，可以拿到。
       # 缺密钥就明确跳过并告警——不能让「跑不了」伪装成「通过了」。
+      # BASE_URL / MODEL 也在检查之列：workflow env 里写成空串会覆盖配置里的值，
+      # 那样建库/重排会以一个容易被误读的错误失败，不如在这里就说清楚缺哪个。
       - name: 检查密钥
         id: keys
         env:
-          EMBEDDING_KEY: ${{ secrets.EMBEDDING_API_KEY }}
-          RERANK_KEY: ${{ secrets.RERANK_API_KEY }}
+          EMBEDDING_BASE_URL: ${{ secrets.EMBEDDING_BASE_URL }}
+          EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+          RERANK_BASE_URL: ${{ secrets.RERANK_BASE_URL }}
+          RERANK_API_KEY: ${{ secrets.RERANK_API_KEY }}
         run: |
-          if [ -z "$EMBEDDING_KEY" ] || [ -z "$RERANK_KEY" ]; then
+          missing=""
+          for name in EMBEDDING_BASE_URL EMBEDDING_API_KEY EMBEDDING_MODEL RERANK_BASE_URL RERANK_API_KEY; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::缺少 EMBEDDING_API_KEY / RERANK_API_KEY，通道 C 跳过（见 backend/eval/README.md）"
+            echo "::warning::缺少 Actions secrets:$missing —— 通道 C 跳过（见 backend/eval/README.md）"
           fi
 
       - name: 恢复向量索引缓存

@@ -267,8 +267,10 @@ FTS5 时代 `search` 每次都要遍历全库 stat 一遍算语料指纹（5146 
 - **B 靠 `actions/cache`**：向量索引 24138 条向量、本机全量构建 ~16 分钟、约 9M token，不可能每 PR 现建。
   缓存键 `milvus-vectors-${{ hashFiles('backend/doc/ob_wiki.zip') }}-v1`（换语料或换嵌入模型时**记得一起改后缀**）。
   **缓存未命中时 B 明确跳过并打 `::notice::`，不假绿**；夜检跑过一次后各分支都能命中（默认分支的缓存对全仓可见）。
-- **C 只在夜检 / 手动**：用 `secrets.EMBEDDING_API_KEY` / `secrets.RERANK_API_KEY`（fork 的 PR 拿不到密钥，
-  所以不能放进每 PR 通道）。缺密钥时同样跳过 + `::warning::`。向量建好后**单独一步** `actions/cache/save@v4`：
+- **C 只在夜检 / 手动**：用 `secrets.EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` 与
+  `secrets.RERANK_BASE_URL` / `RERANK_API_KEY`（fork 的 PR 拿不到密钥，所以不能放进每 PR 通道）。
+  这五个缺任何一个都会跳过 + `::warning::`（`BASE_URL` / `MODEL` 也查，是因为 workflow env 写成空串会
+  覆盖配置里的值，会在建库/重排时报一个容易被误读的错）。向量建好后**单独一步** `actions/cache/save@v4`：
   这样即使后面的重排门禁失败，下一个 PR 的 B 也已有向量可用（用 `actions/cache@v4` 的话 job 失败即不保存）。
   `RERANK_PROTOCOL: dashscope` 必须显式给 —— 配置默认是 `jina`，不给会拼出错端点。
 
