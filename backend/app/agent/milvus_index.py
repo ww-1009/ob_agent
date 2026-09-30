@@ -2,8 +2,8 @@
 
 为什么单独一个模块：
 
-- ``doc_index.py`` 是 FTS5 的旧世界（M7 删除），``retrieval.py``（M5）是查询期融合；两边都要
-  「同一个集合定义」「同一份元数据」。放这里，schema 只写一次，不会漂移。
+- ``doc_index.py``（M7 起只做文档层：切分/精读/门面）与 ``retrieval.py``（M5，查询期融合）
+  都要「同一个集合定义」「同一份元数据」。放这里，schema 只写一次，不会漂移。
 - milvus-lite 3.2.1 是**纯 Python 进程内实现**（``milvus_lite/server_manager.py`` 起本地 gRPC
   线程，随机端口），``data_dir/LOCK`` 是 advisory ``flock``：**一个目录同时只能被一个进程持有**。
   更坑的是 pymilvus 全仓没有 ``release_server`` 调用，``MilvusClient.close()`` **不释放锁**，

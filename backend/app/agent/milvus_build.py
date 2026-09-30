@@ -3,8 +3,8 @@
 口径见 ``backend/eval/docs/milvus-only-retrieval-design.md`` §7，这里把 7 步落成代码：
 
 1. **扫描** ``backend/doc/ob_wiki``：切分与元数据解析复用 ``doc_index`` 的纯函数
-   （``_split_chunks`` / ``_parse_frontmatter`` / ``_detect_mode`` / ``_detect_version``），
-   M7 删 FTS5 时这几个函数会搬到检索侧，构建逻辑不用改。
+   （``_split_chunks`` / ``_parse_frontmatter`` / ``_detect_mode`` / ``_detect_version``）——
+   M7 删 FTS5 后它们仍留在 ``doc_index``（read 也用它，建索引与精读必须同一套切分口径）。
 2. **主键** ``pk = xxh64(f"{path}#{section}#{seq}") & 0x7FFF_FFFF_FFFF_FFFF``。``seq`` 是同一
    小节内的块序号——实测 25077 块里有 1630 组 ``(path, section)`` 重复、单组最多 29 块
    （``配置项/集群级别配置项/index.md`` 的 ``文档明细``），不带 ``seq`` 会在 upsert 时静默丢块。
@@ -150,7 +150,7 @@ def canonical_hash_of(value: str) -> str:
 
 
 def corpus_fingerprint(wiki_dir: Path | str) -> str:
-    """语料指纹 ``文件数:总字节:最新 mtime_ns``（与 FTS5 侧同口径，不含 TTL 缓存）。"""
+    """语料指纹 ``文件数:总字节:最新 mtime_ns``（增量构建的短路键）。"""
     files = size = 0
     newest = 0
     for path in Path(wiki_dir).rglob("*.md"):
