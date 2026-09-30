@@ -39,10 +39,11 @@ def cfg(**over) -> EmbeddingConfig:
 
 
 class FakeResponse:
-    def __init__(self, status: int = 200, payload: dict | None = None, text: str = ""):
+    def __init__(self, status: int = 200, payload: dict | None = None, text: str = "", headers: dict | None = None):
         self.status_code = status
         self._payload = payload
         self.text = text or (json.dumps(payload) if payload is not None else "")
+        self.headers = dict(headers or {})
 
     def json(self):
         if self._payload is None:
@@ -230,6 +231,26 @@ def test_retry_exhausted_raises():
         client.embed_query("x")
     assert len(session.calls) == 3
     assert client.stats()["failures"] == 1
+
+
+def test_rate_limit_retry_honors_retry_after(monkeypatch):
+    """429 的 ``Retry-After`` 必须盖过默认退避：端点 TPM 限速窗口比默认退避长得多。"""
+    waits: list[float] = []
+    monkeypatch.setattr(embedding_mod, "_sleep", waits.append)
+    session = FakeSession(
+        [
+            FakeResponse(429, text="Allocated quota exceeded", headers={"Retry-After": "42"}),
+            FakeResponse(200, payload=body([[1.0, 1.0, 1.0]])),
+        ]
+    )
+    client = ApiEmbeddingClient(cfg(), session=session)
+    assert client.embed_query("x") == [1.0, 1.0, 1.0]
+    assert waits == [42.0]  # 42 > 默认退避第一档，取大的
+    # HTTP-date 形式的 Retry-After 认不出来时退回默认退避（不能当作 0 秒立即重试）
+    assert embedding_mod._retry_after_seconds(
+        FakeResponse(429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"})
+    ) == 0.0
+    assert embedding_mod._retry_after_seconds(FakeResponse(429)) == 0.0
 
 
 def test_client_error_not_retried():

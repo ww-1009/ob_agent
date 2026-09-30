@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -21,11 +22,18 @@ import requests
 
 from app.config import EmbeddingConfig, load_settings
 
+logger = logging.getLogger(__name__)
+
 # 服务端硬上限（百炼兼容模式实测）：单请求 input 最多 20 条。
 MAX_BATCH_SIZE = 20
-# 失败重试：只对「可能是抖动」的状态码重试，4xx 直接抛（多半是模型名/维度/额度问题）。
-_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
-_RETRY_BACKOFF_SECONDS = (0.4, 1.2)
+# 失败重试：只对「可能是抖动」的状态码重试，其它 4xx 直接抛（多半是模型名/维度问题）。
+# 403 也进重试集：百炼侧「AccessDenied.Unpurchased」实测是**间歇性**的（同一 key 前一刻
+# 可用、构建中途突然 403），慢建模式下宁可多等 3 分钟也不要把整次全量构建废掉。
+_RETRY_STATUS = frozenset({403, 429, 500, 502, 503, 504})
+#: 429 多半是端点 TPM/日配额限速，退避必须够长才可能跨过一个限速窗口（实测并发 4、
+#: batch 16 时约 45s 撞 429，旧值 (0.4, 1.2) 三次重试都在同一窗口内，必然全灭）。
+#: 服务端给了 ``Retry-After`` 就用它（取二者较大值）。
+_RETRY_BACKOFF_SECONDS = (5.0, 20.0, 60.0, 120.0)
 
 
 class EmbeddingUnavailable(RuntimeError):
@@ -38,6 +46,20 @@ class EmbeddingUnavailable(RuntimeError):
 def _truncate(text: str, limit: int = 240) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _retry_after_seconds(response: requests.Response) -> float:
+    """解析 ``Retry-After``（只认秒数形式；HTTP-date 形式当没给）。"""
+    raw = response.headers.get("Retry-After") or ""
+    try:
+        return max(0.0, float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sleep(seconds: float) -> None:
+    """重试等待（单独抽成函数，测试里替换掉真实 sleep）。"""
+    threading.Event().wait(seconds)
 
 
 class ApiEmbeddingClient:
@@ -173,6 +195,7 @@ class ApiEmbeddingClient:
             raise EmbeddingUnavailable("embedding 未配置模型（embedding.model）")
         payload = self._payload(batch)
         last_error = ""
+        retry_after = 0.0
         for attempt in range(len(_RETRY_BACKOFF_SECONDS) + 1):
             try:
                 with self._lock:
@@ -185,6 +208,7 @@ class ApiEmbeddingClient:
             else:
                 if response.status_code in _RETRY_STATUS:
                     last_error = f"HTTP {response.status_code}: {_truncate(response.text)}"
+                    retry_after = _retry_after_seconds(response)
                 elif response.status_code >= 400:
                     with self._lock:
                         self._stats["failures"] += 1
@@ -209,7 +233,12 @@ class ApiEmbeddingClient:
             if attempt < len(_RETRY_BACKOFF_SECONDS):
                 with self._lock:
                     self._stats["retries"] += 1
-                threading.Event().wait(_RETRY_BACKOFF_SECONDS[attempt])
+                wait = max(_RETRY_BACKOFF_SECONDS[attempt], retry_after)
+                retry_after = 0.0
+                logger.info(
+                    "embedding 第 %d 次重试，等 %.1fs（%s）", attempt + 1, wait, last_error
+                )
+                _sleep(wait)
         with self._lock:
             self._stats["failures"] += 1
         raise EmbeddingUnavailable(f"embedding 连续 {len(_RETRY_BACKOFF_SECONDS) + 1} 次失败：{last_error}")
