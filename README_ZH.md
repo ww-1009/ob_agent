@@ -64,7 +64,11 @@ ob_agent/
 │   │   │   ├── prompt.py     # System Prompt（DBA 助手 + 规则）
 │   │   │   ├── confirm.py    # HITL 人工确认通道（ConfirmationBroker + 中间件）
 │   │   │   ├── tools.py      # 11 个 DBA 工具 + search_docs/read_doc + 2 个只读文档文件工具（共注册 15 个）
-│   │   │   ├── doc_index.py  # ob_wiki FTS5 索引：建库 / 检索 / 按小节读取
+│   │   │   ├── doc_index.py  # ob_wiki 文档层：切分 / 检索门面 / 按小节读文件
+│   │   │   ├── embedding.py  # Embedding API 客户端（批量向量化、重试退避）
+│   │   │   ├── milvus_index.py # Milvus Lite 集合：schema / 元数据 / 查询 / CLI（stats·health·rebuild）
+│   │   │   ├── milvus_build.py # 语料 → Milvus 构建（增量/重建、稀疏+稠密、原子换库）
+│   │   │   ├── retrieval.py  # 查询期：sparse/dense/hybrid + RRF + 列权重重排
 │   │   │   ├── plan_view.py  # 把 OCP 计划报文归一化成先序、带 depth 的算子视图
 │   │   │   ├── plan_diff.py  # 两份计划视图对比：结论 / 代价倍数 / 回归算子
 │   │   │   └── tool_input.py # 工具入参 Pydantic 模型
@@ -195,10 +199,13 @@ cd frontend && npm test
 ```
 
 文档工具的测试分两层：`tests/test_doc_index.py` 跑小型合成语料（快、只验机制），
-`tests/test_retrieval_eval.py` 用 50 条真实提问打 5146 篇真语料，按命中率@5 与 MRR 做门禁
-（语料不存在时自动跳过）。真语料基线：**命中率@1 60%、命中率@5 82%、命中率@10 94%、MRR@10 0.704**，
-单次查询约 114 ms；低于命中率@5 80% / MRR 0.68 门禁即失败，所以调排序常数不会再悄悄弄差检索。
-`.github/workflows/ci.yml` 按「后端 pytest → 检索门禁 → 前端 vitest」顺序执行（`main` / `feature-dev`
+`tests/test_retrieval_eval.py` 用 179 条真实提问打 5146 篇真语料，按命中率@5 与 MRR 做门禁
+（语料不存在时自动跳过；M7 起 Milvus 索引库没建时那三条门禁断言也跳过）。真语料基线
+（Milvus sparse，M7 重录）：**命中率@1 68.72%、命中率@5 88.27%、命中率@10 92.74%、MRR@10 0.760**，
+单次查询 P50 约 89 ms；另两路也已测出：dense 86.59% / 0.763、hybrid 91.62% / 0.819
+（完整对照见 `backend/eval/README.md`）。低于命中率@5 76% / MRR 0.68 门禁即失败，
+所以调排序常数不会再悄悄弄差检索。
+`.github/workflows/ci.yml` 按「解压语料 → 建稀疏 Milvus 索引 → 后端 pytest → 检索门禁 → 前端 vitest」顺序执行（`main` / `feature-dev`
 推送与 PR 触发），并把完整评测报告作为 artifact 上传。
 
 ---
@@ -361,9 +368,15 @@ agent 的**意外异常不会原文下发**：客户端只拿到一句通用文�
 1. **`backend/config.yaml`** 与 **`backend/.env`**：按[配置说明](#配置说明)生成并填写真实值。
 2. **`backend/doc/`**：OceanBase 官方文档知识库目录。仓库自带压缩包
    `backend/doc/ob_wiki.zip`，部署时在该目录下就地解压即可，解压得到 `backend/doc/ob_wiki/`（解压产物已被 gitignore）。
-   agent 通过 `search_docs` / `read_doc` 两个工具使用它（全文检索 + 按小节精读），底层是 SQLite FTS5 索引
-   `backend/doc/ob_wiki.index.db`——这是**构建产物**，同样 gitignore，缺失或语料变化时会自动重建（5100+ 篇约 5 秒）。
-   `read_file` / `list_directory` 仍保留用于浏览目录，根目录限定 `./doc`。**缺少该目录会导致文档检索功能不可用**。
+   agent 通过 `search_docs` / `read_doc` 两个工具使用它；M7 起检索**只走 Milvus Lite**：一个集合里同时放
+   内建 BM25 稀疏列与 1024 维稠密列（`backend/doc/ob_wiki.milvus.db`，同样 gitignore、也是构建产物）。
+   全新 checkout 没有索引库，先建一次（没建之前检索降级成空结果，不会 500）：
+   `cd backend && .venv/bin/python -m app.agent.milvus_index --rebuild --no-vectors` 只建稀疏索引
+   （不需要 embedding 密钥，25220 块约 75 秒）；`--rebuild`（不带 `--no-vectors`）会额外写入真向量，
+   供 `dense` / `hybrid` 两路使用，需要配好 embedding。FTS5 时代的 SQLite 索引
+   `backend/doc/ob_wiki.index.db` 已不再被任何代码路径读取，本地保留一个 release 周期。
+   `read_doc` 直接读 wiki `.md` 文件，完全不依赖索引库。`read_file` / `list_directory`
+   仍保留用于浏览目录，根目录限定 `./doc`。**缺少该目录会导致文档检索功能不可用**。
 3. **PostgreSQL**（仅当 `memory.enabled: true`）：可连的实例 + 能在 `public` 下建表的账号。检查点与历史表由后端首次启动时自建，见[会话记忆（PostgreSQL）](#会话记忆postgresql)。
 
 > 运行目录约定：后端以 `backend/` 为工作目录运行（`run.sh` 会 `cd` 到脚本所在目录），
@@ -519,7 +532,7 @@ curl -N -X POST https://your-domain.example.com/api/chat \
 - **SSE**：客户端断开时确认服务端真中止（无孤儿 task）。
 - **LLM**：配置完成后，mock/演示提示改为按 provider 注入（当前 prompt 已不再内嵌 mock 提示）。
 - **资源水位**：已实现 —— 新增 `get_cluster_list`、`get_cluster_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/stats`，返回扁平 `ClusterResourceStats`）与 `get_server_resource_stats`（对应 `GET /api/v2/ob/clusters/{id}/serverStats`，返回 `data.contents` 列表）。工具层按白名单裁剪字段并补出 `cpuAssignedPct` / `memoryAssignedPct` / `dataDiskUsedPct` / `logDiskUsedPct` 水位百分比；取不到数据时按 `not_found` 返回 `ok:false`，避免把「无数据」误读成「零水位」。待联调确认：真实报文字段名与文档一致（CPU 为核数，内存/磁盘为 Byte），以及是否需要传采样时间窗。
-- **文档检索**：已实现 —— `search_docs` / `read_doc` 取代「逐级猜目录名、再整篇读文件」（`backend/app/agent/doc_index.py`）。语料做了中文预分词（CJK 单字 + 双字）后建 FTS5 external-content 索引（`tokenize='unicode61'`），所以「事务」「索引」「锁」这类双字查询能命中（SQLite `trigram` 分词器做不到）。检索直接返回命中的**小节** + 可读摘要 + `score`；提问里写的模式（MySQL/Oracle）和版本号会自动识别为过滤条件（否则同名文档无法区分）；中文疑问词/虚词（`哪些` / `如何` / `一共` / `包含` …）会从检索词里剔除，所以「错误码一共有哪些」不再被满篇「哪些」的 FAQ 顶到前排；导航型文件（`index.md` 与根 `README.md`）归为 `nav` 并重降权（`NAVIGATION_FILE_PENALTY`）而不是硬排除——它们只指路，答案以正文为准——只有问「有哪些分类 / 文档库怎么组织」时用 `include_index=true` 取消该惩罚；正文里的导航型小节（`相关文档` / `参见` / `更多信息`）同样降权，`read_doc` 再按小节精读并返回 `sections` 目录。真实语料实测：5146 篇 → 25077 个分块、索引 67.7 MB、重建约 5 秒、单次查询约 70–130 ms（耗时主要在 OR 扩展召回这一路）。
+- **文档检索**：已实现 —— `search_docs` / `read_doc` 取代「逐级猜目录名、再整篇读文件」。M7 起检索**只走 Milvus Lite**：`backend/app/agent/milvus_index.py` 管集合定义（内建 BM25 稀疏列，`enable_analyzer=True` + jieba 分词器，外加 `FLOAT_VECTOR(1024)` 稠密列），`milvus_build.py` 负责从语料构建（语料指纹短路做增量，或 `--rebuild`；先写 side 目录再原子换库，构建失败不碰在用的索引），`retrieval.py` 做查询期工作——sparse / dense / hybrid 三路、自研 RRF 融合（`rrf_k=60`）与列权重重排。FTS5 索引及其分词/降权机制整体删除（`doc_index.py` 925 → 461 行，只剩文档层：切分、检索门面、直接从 `.md` 读文件——read 从此能看到整篇的**全部**小节，而 FTS5 的 chunks 表每篇最多存 2 块）。Milvus 内建 BM25 只有一列 `text`，FTS5 的列权重改成**客户端重排**：构建时另存 `keywords` 一列，稀疏路按 `0.5 * 归一化距离 + 0.5 * 列覆盖率`（标题 10 / 关键词 6 / 小节 4 / 正文 1）打分，且只用**原始查询**（同义词扩展只帮召回、不参与列分）。检索直接返回命中的**小节** + 可读摘要 + `score`；提问里写的模式（MySQL/Oracle）和版本号会自动识别为过滤条件（否则同名文档无法区分）；中文疑问词/虚词（`哪些` / `如何` / `一共` / `包含` …）会从检索词里剔除，所以「错误码一共有哪些」不再被满篇「哪些」的 FAQ 顶到前排；导航型文件（`index.md` 与根 `README.md`）归为 `nav` 并重降权（`nav_file_penalty`）而不是硬排除——它们只指路，答案以正文为准——只有问「有哪些分类 / 文档库怎么组织」时用 `include_index=true` 取消该惩罚；正文里的导航型小节（`相关文档` / `参见` / `更多信息`）同样降权。`read_doc` 按小节精读并返回 `sections` 目录，内容是直接读文件来的。真实语料实测：5146 篇 → 25220 个分块（doc 24138 + nav 1082），sparse 单次查询 P50 约 89 ms，稀疏路 88.27% 命中率@5 / MRR 0.760、dense 86.59% / 0.763、hybrid 91.62% / 0.819。
 - **执行计划对比 / 回归检测**：已实现 —— `compare_plans`（`backend/app/agent/plan_diff.py`）回答「同一条 SQL 突然变慢，为什么」。它重建两棵计划树，把 OCP 的**累计代价**换算成算子自身代价（这样真正该负责的是变化的那片叶子，而不是继承增量的每个祖先），同层按 `(operator, name)` 做 LCS 对齐，输出结论（`unchanged` / `changed` / `regressed` / `improved`）、代价倍数、回归与改善的算子、新增/删除算子、以及属性级说明（可用索引消失、`physical_range_rows` 暴涨、回表、输出行数）；返回的树会裁掉无关分支。mock 回归夹具（丢索引 → 全表扫描）上输出：结论 `regressed`、代价倍数 95.2、总代价 1958 → 186416、行数 1 → 971070，并定位到 `PHY_TABLE_SCAN(WRT(WARN_RULE_TOTAL_INDEX_N1))`。
-- **检索评测 + CI**：已实现 —— `backend/eval/` 存放 50 条真实 DBA 提问与期望文档（`retrieval_cases.jsonl`）和 `run_eval.py`，输出命中率@1/@5/@10、MRR、延迟与按 tag 的分组，低于命中率@5 80% 或 MRR 0.68 即非零退出（基线 60% / 82% / 94%，MRR 0.704）。`tests/test_retrieval_eval.py` 在 pytest 里跑同一套门禁，并额外守两条不变量：每个期望路径必须仍存在于语料（语料升级后评测集过期会直接报错）、导航页永远不得抢走正文答案的第一名。`.github/workflows/ci.yml` 依次跑后端 pytest、该门禁与前端 vitest；`backend/scripts/unpack_doc.py` 负责在 CI 里解压语料（修复压缩包的非 UTF-8 文件名，并把 mtime 钉在压缩包记录上，使索引指纹与机器无关）。
+- **检索评测 + CI**：已实现 —— `backend/eval/` 存放 179 条真实 DBA 提问与期望文档（`retrieval_cases.jsonl`）和 `run_eval.py`，输出命中率@1/@5/@10、MRR、延迟与按 tag 的分组，低于命中率@5 76% 或 MRR 0.68 即非零退出（Milvus sparse 基线、M7 重录：88.27% / 0.760；dense 86.59% / 0.763、hybrid 91.62% / 0.819 也已测出，FTS5 时代旧基线为 79.33% / 0.706）。M7 起检索只走 Milvus，评测前必须先有索引库，所以 CI 在解压语料之后、pytest 之前先跑 `python -m app.agent.milvus_index --rebuild --no-vectors`（只建稀疏索引，不需要 embedding 密钥）。`tests/test_retrieval_eval.py` 在 pytest 里跑同一套门禁（索引库缺失时跳过那三条断言），并额外守两条不变量：每个期望路径必须仍存在于语料（语料升级后评测集过期会直接报错）、导航页永远不得抢走正文答案的第一名。`.github/workflows/ci.yml` 依次跑解压语料、建稀疏索引、后端 pytest、该门禁与前端 vitest；`backend/scripts/unpack_doc.py` 负责在 CI 里解压语料（修复压缩包的非 UTF-8 文件名，并把 mtime 钉在压缩包记录上，使索引指纹与机器无关）。
 - **Oracle 租户**：已实现 —— `execute_sql` / `get_table_ddl` 现已把 Oracle 模式租户路由到 OCI 驱动（`backend/app/tools/sql/oracle.py`）。DSN 的 service name 直接取工具的 `db_name` 参数（即该租户的 SERVICE_NAME），不再从配置读取；只读账号无 `@` 时补成 `user@tenant#cluster`。`get_table_ddl` 以 `db_name` 作 DDL 的 owner，回退 SQL 为 `all_tab_columns where owner = <db_name>`。`connect_timeout` / `query_timeout_seconds` 只传给支持它们的驱动（`oracledb` 瘦模式两者都支持；`cx_Oracle` 无 `tcp_connect_timeout`（跳过），`call_timeout` 仅在版本支持时设置，跳过时记 debug 日志）。待联调确认：该租户的 SERVICE_NAME 是否与你传入的 `db_name` 一致（不一致会报 ORA-12514/12505）、以及是否开放 `DBMS_METADATA.GET_DDL`。注意 `cx_Oracle` 无 Python ≥ 3.11 轮子，故 `driver` 默认 `oracledb`（瘦模式，无需 Oracle 客户端库）。

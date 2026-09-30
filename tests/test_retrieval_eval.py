@@ -6,6 +6,10 @@
 
 语料是解压产物、不入库，所以跑之前要先 ``python backend/scripts/unpack_doc.py``（CI 里有这一步）；
 语料不存在时整个文件跳过，本地不跑也不会红。
+
+M7 起检索只走 Milvus Lite（FTS5 已删），所以还要先有索引库：``cd backend &&
+python -m app.agent.milvus_index --rebuild --no-vectors``（CI 里在 pytest 之前建）。
+索引库缺失时检索会降级成空结果、命中率恒为 0，此时跳过三条门禁断言而不是把测试判红。
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.doc_index import DocIndex
+from app.config import load_settings
 from eval.run_eval import (
     DEFAULT_DEEP,
     DEFAULT_K,
@@ -28,11 +33,17 @@ from eval.run_eval import (
 _BACKEND = Path(__file__).resolve().parents[1] / "backend"
 _DOC_ROOT = _BACKEND / "doc"
 _CORPUS = _DOC_ROOT / "ob_wiki"
+_INDEX = load_settings().retrieval.resolve_milvus_path()
 
 pytestmark = pytest.mark.skipif(
     not _CORPUS.is_dir(),
     reason="真语料未解压；先跑 backend/scripts/unpack_doc.py",
 )
+
+
+def _index_ready() -> bool:
+    """Milvus Lite 库是否就位（目录存在且有内容；空目录按缺失处理）。"""
+    return _INDEX.is_dir() and any(_INDEX.iterdir())
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +53,11 @@ def cases():
 
 @pytest.fixture(scope="module")
 def report(cases):
-    # 索引不存在时会就地构建（~8s），存在且指纹一致时直接复用
+    if not _index_ready():
+        pytest.skip(
+            "Milvus 索引库缺失；先跑 python -m app.agent.milvus_index --rebuild --no-vectors"
+        )
+    # M7 起 DocIndex 不再就地建库（FTS5 懒建路径已删），索引必须在评测前建好
     index = DocIndex(_DOC_ROOT)
     return run_eval(index, cases, k=DEFAULT_K, deep=DEFAULT_DEEP)
 

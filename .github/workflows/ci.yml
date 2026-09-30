@@ -32,15 +32,17 @@ jobs:
       - name: 解压官方文档语料
         run: python backend/scripts/unpack_doc.py
 
-      - name: 后端测试
-        run: python -m pytest -q
-
-      # M7 起检索走 Milvus Lite（FTS5 已删）：全新 checkout 里没有索引库，不先建库评测会
-      # 整体降级成空结果（hit@5 = 0）。--no-vectors 只打稀疏索引，不需要 embedding 密钥，
-      # 25077 块实测 ~66s；这也是 M8 三通道里 A 通道（sparse，每 PR）的雏形。
+      # M7 起检索走 Milvus Lite（FTS5 已删）：全新 checkout 里没有索引库，不先建库
+      # `tests/test_retrieval_eval.py` 的三条门禁断言与后面的评测 CLI 都会整体降级成空结果
+      # （hit@5 = 0）。--no-vectors 只打稀疏索引，不需要 embedding 密钥，25220 块实测 ~75s；
+      # 这也是 M8 三通道里 A 通道（sparse，每 PR）的雏形。放在 pytest 之前是为了让
+      # pytest 里的门禁断言也跑在真索引上（库缺失时那三条会 skip）。
       - name: 构建 Milvus 稀疏索引
         working-directory: backend
         run: python -m app.agent.milvus_index --rebuild --no-vectors
+
+      - name: 后端测试
+        run: python -m pytest -q
 
       # 检索质量门禁：真语料上的命中率@5 / MRR 低于阈值即失败（阈值与基线见 backend/eval/README.md）。
       # 放在 pytest 之后，这样门禁失败时测试结果仍然可读。

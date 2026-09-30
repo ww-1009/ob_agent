@@ -70,12 +70,12 @@ retrieval:
   query_timeout_seconds: 5
   query_cache_size: 512
   max_text_bytes: 8000         # 倒排文本字节上限（Milvus VARCHAR 按字节计）
-  fingerprint_ttl_seconds: 5.0 # 语料指纹缓存 TTL（秒）；0 = 不缓存
   version_match_bonus: 8.0     # 取回后、进入 RRF 前的分数调整
   nav_section_penalty: 12.0
   nav_file_penalty: 40.0
-  # 影子模式开关：fts5 | sparse | dense | hybrid。删除 FTS5 前保持 fts5，才能逐条比对新旧基线
-  default_retriever: "fts5"
+  # 默认引擎：sparse | dense | hybrid（M7 起 FTS5 已删除；sparse 是过门禁的那一路）
+  # dense / hybrid 每次查询要调一次 embedding API，需要 embedding 配置齐全；没配就填 sparse
+  default_retriever: "sparse"
 embedding:
   # OpenAI 兼容根地址，要含 /v1：代码请求 {base_url}/embeddings
   base_url: "https://<embedding-host>/v1"
