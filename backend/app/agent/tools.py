@@ -84,6 +84,19 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
     return "internal", f"工具内部错误（{type(exc).__name__}）"
 
 
+#: 检索降级时给模型的下一步建议。键与 ``RetrievalResult.degraded`` 同口径（设计 §8.7）：
+#: 降级不抛异常，只把「结果为什么少」翻译成模型能行动的提示。
+_DEGRADED_HINTS = {
+    "milvus_index_missing": "文档索引还没建好（本次没查到不代表文档里没有）：请让运维执行 "
+    "`python -m app.agent.milvus_index --rebuild --no-vectors` 重建索引后再试。",
+    "milvus_unavailable": "Milvus 索引库暂时打不开（常见原因是同目录被另一个进程/worker 占着）："
+    "确认后端以单 worker 运行（--workers 1）且没有别的建索引进程，再重试。",
+    "index_stale": "索引与语料不一致（指纹不匹配）：请重建索引后再试，本次结果可能过期。",
+    "dense_unavailable": "稠密向量不可用，本次只走了关键词（稀疏）一路，召回可能偏少："
+    "换 2-4 字的核心词重试，或让运维补建向量索引。",
+}
+
+
 def _error(exc: BaseException) -> str:
     """工具内异常 → ok:false 观察结果：分类 + 脱敏 + 短 error_id。
 
@@ -453,7 +466,8 @@ def build_tools(
         分类索引页与知识库检索指南（README）会正常参与；其余情况保持默认，答案以正文为准。
         """
         try:
-            hits = get_index().search(
+            index = get_index()
+            hits = index.search(
                 query, limit=limit or DEFAULT_LIMIT, mode=mode or "",
                 version=version or "", include_index=bool(include_index),
             )
@@ -464,9 +478,21 @@ def build_tools(
             "hits": hits,
             "hit_count": len(hits),
         }
+        # 检索层从不抛异常（设计 §8.7）：降级会静默返回空/偏少的结果，必须让模型知道
+        # 「这次没查到」不等于「文档里没有」，否则它会答"没有相关文档"。
+        state = getattr(index, "last_retrieval", None)
+        if state is not None and state.degraded:
+            payload["degraded"] = state.degraded
+            payload["hint"] = _DEGRADED_HINTS.get(
+                state.degraded, f"检索降级（{state.degraded}）：结果可能不完整。"
+            )
+        elif state is not None and state.rerank_degraded:
+            payload["hint"] = "重排服务不可用，本次结果按融合顺序返回（仍可用，但排序可能不够准）。"
         if not hits:
             # 空结果不是错误，但要让模型知道该怎么办：换成更短的核心词再试
-            payload["hint"] = "未检索到相关小节：请改用 2-4 字的核心词（去掉疑问词/长句）后重试"
+            payload.setdefault(
+                "hint", "未检索到相关小节：请改用 2-4 字的核心词（去掉疑问词/长句）后重试"
+            )
         return _ok(**payload)
 
     @tool(args_schema=DocReadInput)

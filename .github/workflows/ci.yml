@@ -1,9 +1,17 @@
 name: CI
 
+# 三通道（设计文档 §11.3）：
+#   A backend        每 PR，sparse + 无重排：新基线零回归、by_tag.literal 不劣化、导航页门禁。
+#   B hybrid         每 PR，hybrid + 无重排：质量门禁；向量库走 actions/cache（由夜检预热）。
+#   C retrieval-nightly  定时/手动，hybrid + API 重排：hit@1 门禁；需要 embedding 与 rerank 密钥。
+# A 不需要任何密钥（稀疏索引纯本地构建）；B 没命中缓存时明确跳过而不是假绿。
 on:
   push:
     branches: [main, feature-dev]
   pull_request:
+  schedule:
+    - cron: "0 20 * * *" # 每天 20:00 UTC = 次日 04:00（北京时间），低峰跑带密钥的夜检
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -11,7 +19,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (pytest + 检索评测门禁)
+    name: Backend (pytest + 检索评测门禁 A/sparse)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +42,8 @@ jobs:
 
       # M7 起检索走 Milvus Lite（FTS5 已删）：全新 checkout 里没有索引库，不先建库
       # `tests/test_retrieval_eval.py` 的三条门禁断言与后面的评测 CLI 都会整体降级成空结果
-      # （hit@5 = 0）。--no-vectors 只打稀疏索引，不需要 embedding 密钥，25220 块实测 ~75s；
-      # 这也是 M8 三通道里 A 通道（sparse，每 PR）的雏形。放在 pytest 之前是为了让
-      # pytest 里的门禁断言也跑在真索引上（库缺失时那三条会 skip）。
+      # （hit@5 = 0）。--no-vectors 只打稀疏索引，不需要 embedding 密钥，25220 块实测 ~75s。
+      # 放在 pytest 之前是为了让 pytest 里的门禁断言也跑在真索引上（库缺失时那三条会 skip）。
       - name: 构建 Milvus 稀疏索引
         working-directory: backend
         run: python -m app.agent.milvus_index --rebuild --no-vectors
@@ -44,17 +51,182 @@ jobs:
       - name: 后端测试
         run: python -m pytest -q
 
-      # 检索质量门禁：真语料上的命中率@5 / MRR 低于阈值即失败（阈值与基线见 backend/eval/README.md）。
-      # 放在 pytest 之后，这样门禁失败时测试结果仍然可读。
-      - name: 文档检索评测（门禁）
-        run: python backend/eval/run_eval.py --strict --json retrieval-eval.json
+      # 通道 A：真语料上的命中率@5 / MRR / 命中率@1 / 导航页 top1 门禁。
+      # --rerank off 是必须显式的：本机配置里 rerank 是 auto，不关就量不到「无重排」基线。
+      # 阈值与基线见 backend/eval/README.md；放在 pytest 之后，这样门禁失败时测试结果仍可读。
+      - name: 文档检索评测（通道 A：sparse）
+        run: |
+          python backend/eval/run_eval.py \
+            --retriever sparse --rerank off --strict \
+            --min-recall 0.80 --min-mrr 0.68 --max-nav-top1 0 \
+            --json retrieval-eval-sparse.json
 
-      - name: 上传评测报告
+      - name: 上传评测报告（sparse）
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: retrieval-eval
-          path: retrieval-eval.json
+          name: retrieval-eval-sparse
+          path: retrieval-eval-sparse.json
+          if-no-files-found: ignore
+
+  hybrid:
+    name: Backend (检索评测门禁 B/hybrid)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 安装后端依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: 解压官方文档语料
+        run: python backend/scripts/unpack_doc.py
+
+      # 含向量的索引库（24138 条向量，本机全量构建 ~16 分钟、约 9M token）不可能每个 PR 现建：
+      # 由夜检通道 C 构建并存入 actions/cache，默认分支的缓存对所有分支可见。
+      # 缓存键只跟语料与嵌入模型有关；换语料/换模型时把 -v1 后缀一起改掉。
+      - name: 恢复向量索引缓存
+        id: vectors
+        uses: actions/cache/restore@v4
+        with:
+          path: backend/doc/ob_wiki.milvus.db
+          key: milvus-vectors-${{ hashFiles('backend/doc/ob_wiki.zip') }}-v1
+
+      - name: 无向量缓存时只建稀疏索引（并说明 B 为何跳过）
+        if: steps.vectors.outputs.cache-hit != 'true'
+        working-directory: backend
+        run: |
+          echo "::notice::未命中向量缓存 milvus-vectors-…-v1，跳过通道 B；夜检跑过一次后即会命中"
+          python -m app.agent.milvus_index --rebuild --no-vectors
+
+      - name: 文档检索评测（通道 B：hybrid）
+        if: steps.vectors.outputs.cache-hit == 'true'
+        run: |
+          python backend/eval/run_eval.py \
+            --retriever hybrid --rerank off --strict \
+            --min-recall 0.88 --min-mrr 0.78 --max-nav-top1 0 \
+            --json retrieval-eval-hybrid.json
+
+      - name: 上传评测报告（hybrid）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval-hybrid
+          path: retrieval-eval-hybrid.json
+          if-no-files-found: ignore
+
+  retrieval-nightly:
+    name: 检索夜检（通道 C：hybrid + API 重排）
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 安装后端依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: 解压官方文档语料
+        run: python backend/scripts/unpack_doc.py
+
+      # 仓库是公开的：fork 的 PR 拿不到密钥，但 schedule/dispatch 在默认分支上跑，可以拿到。
+      # 缺密钥就明确跳过并告警——不能让「跑不了」伪装成「通过了」。
+      - name: 检查密钥
+        id: keys
+        env:
+          EMBEDDING_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          RERANK_KEY: ${{ secrets.RERANK_API_KEY }}
+        run: |
+          if [ -z "$EMBEDDING_KEY" ] || [ -z "$RERANK_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::缺少 EMBEDDING_API_KEY / RERANK_API_KEY，通道 C 跳过（见 backend/eval/README.md）"
+          fi
+
+      - name: 恢复向量索引缓存
+        id: vectors
+        if: steps.keys.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: backend/doc/ob_wiki.milvus.db
+          key: milvus-vectors-${{ hashFiles('backend/doc/ob_wiki.zip') }}-v1
+
+      # 缓存未命中才现建：全量向量 ~16 分钟、约 9M token，只在夜检里付这个成本
+      - name: 构建 Milvus 索引（含向量）
+        if: steps.keys.outputs.skip != 'true' && steps.vectors.outputs.cache-hit != 'true'
+        working-directory: backend
+        env:
+          EMBEDDING_BASE_URL: ${{ secrets.EMBEDDING_BASE_URL }}
+          EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          EMBEDDING_MODEL: ${{ secrets.EMBEDDING_MODEL }}
+        run: python -m app.agent.milvus_index --rebuild
+
+      # 与上一步分开保存：即使后面的重排门禁失败，向量缓存也已经存好，
+      # 通道 B 下一个 PR 就能跑起来（用 actions/cache@v4 的话失败即不保存）。
+      - name: 保存向量索引缓存
+        if: steps.keys.outputs.skip != 'true' && steps.vectors.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: backend/doc/ob_wiki.milvus.db
+          key: milvus-vectors-${{ hashFiles('backend/doc/ob_wiki.zip') }}-v1
+
+      # 通道 C 主口径：生产默认引擎是 sparse，重排也只在 sparse 上实测有净收益
+      # （@5 +1.67pp、literal 27/28；hybrid + 重排反而把 top1 打下去，见 eval/README）。
+      - name: 文档检索评测（通道 C：sparse + rerank，生产口径）
+        if: steps.keys.outputs.skip != 'true'
+        env:
+          RERANK_PROTOCOL: dashscope
+          RERANK_BASE_URL: ${{ secrets.RERANK_BASE_URL }}
+          RERANK_API_KEY: ${{ secrets.RERANK_API_KEY }}
+          RERANK_MODEL: ${{ secrets.RERANK_MODEL || 'qwen3.7-text-rerank' }}
+        run: |
+          python backend/eval/run_eval.py \
+            --retriever sparse --rerank api --strict \
+            --min-recall 0.88 --min-mrr 0.75 --min-hit1 0.66 --max-nav-top1 0 \
+            --json retrieval-eval-nightly-sparse.json
+
+      - name: 上传评测报告（sparse + rerank）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval-nightly-sparse
+          path: retrieval-eval-nightly-sparse.json
+          if-no-files-found: ignore
+
+      # 通道 C：重排门禁（hybrid 口径，保留作探针）。--rerank api 只看密钥不看配置 mode；
+      # protocol 必须显式 dashscope，否则会按配置默认的 jina 协议拼出错误端点。
+      - name: 文档检索评测（通道 C：hybrid + rerank）
+        if: steps.keys.outputs.skip != 'true'
+        env:
+          RERANK_PROTOCOL: dashscope
+          RERANK_BASE_URL: ${{ secrets.RERANK_BASE_URL }}
+          RERANK_API_KEY: ${{ secrets.RERANK_API_KEY }}
+          RERANK_MODEL: ${{ secrets.RERANK_MODEL || 'qwen3.7-text-rerank' }}
+        run: |
+          python backend/eval/run_eval.py \
+            --retriever hybrid --rerank api --strict \
+            --min-recall 0.88 --min-mrr 0.78 --min-hit1 0.65 --max-nav-top1 0 \
+            --json retrieval-eval-nightly.json
+
+      - name: 上传评测报告（hybrid + rerank）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval-nightly
+          path: retrieval-eval-nightly.json
           if-no-files-found: ignore
 
   frontend:

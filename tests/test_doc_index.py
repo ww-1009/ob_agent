@@ -407,6 +407,52 @@ def test_search_docs_tool_empty_result_gives_hint(doc_tools):
     assert "hint" in out
 
 
+def test_search_docs_tool_reports_degraded_hint(doc_tools):
+    """降级不抛异常，但要把「为什么没查到」翻译成模型能行动的 hint（设计 §8.7）。"""
+    import app.agent.tools as tools_mod
+    from app.agent import retrieval as rt
+
+    index = tools_mod.get_index()
+
+    def degraded_search(query, engine, **kwargs):
+        index.last_retrieval = rt.RetrievalResult(degraded="milvus_unavailable")
+        return []
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(index, "_search_milvus", degraded_search)
+        out = json.loads(doc_tools["search_docs"].invoke({"query": "MySQL 模式的事务隔离级别"}))
+    assert out["ok"] is True and out["hits"] == []
+    assert out["degraded"] == "milvus_unavailable"
+    assert "单 worker" in out["hint"]
+    assert "未检索到相关小节" not in out["hint"], "降级时给通用空结果提示会误导模型"
+
+
+def test_search_docs_tool_reports_rerank_degraded(doc_tools):
+    import app.agent.tools as tools_mod
+    from app.agent import retrieval as rt
+
+    index = tools_mod.get_index()
+    hit = {
+        "path": "ob_wiki/事务隔离级别/MySQL 模式的事务隔离级别.md",
+        "kind": "doc",
+        "section": "隔离级别设置方法",
+        "title": "MySQL 模式的事务隔离级别",
+        "score": 1.0,
+        "snippet": "…",
+    }
+
+    def rerank_failed(query, engine, **kwargs):
+        index.last_retrieval = rt.RetrievalResult(entries=[hit], rerank_degraded=True)
+        return [hit]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(index, "_search_milvus", rerank_failed)
+        out = json.loads(doc_tools["search_docs"].invoke({"query": "MySQL 模式的事务隔离级别"}))
+    assert "degraded" not in out, "重排降级不是检索降级"
+    assert "重排" in out["hint"]
+    assert out["hit_count"] == 1
+
+
 def test_read_doc_tool_returns_section(doc_tools):
     out = json.loads(doc_tools["read_doc"].invoke(
         {"path": "ob_wiki/问题排查/锁等待排查.md", "section": "典型案例"}

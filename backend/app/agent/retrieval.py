@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.agent.embedding import get_embedding_client
@@ -55,12 +55,17 @@ from app.agent.milvus_index import (
     MilvusUnavailable,
     get_milvus_index,
 )
+from app.agent.rerank import get_reranker
 from app.config import RetrievalConfig, Settings, load_settings
 
 logger = logging.getLogger(__name__)
 
 #: 支持的检索器；M7 已删掉 FTS5，这里是唯一实现
 RETRIEVERS = ("sparse", "dense", "hybrid")
+
+#: 重排模式（与 ``RerankConfig.mode`` 同名单）：``""`` 取配置，``auto`` 配置齐全才启用，
+#: ``off`` 强制关闭，``api`` 强制启用（未配置时只标降级、不抛）
+RERANK_MODES = ("auto", "off", "api")
 
 #: 后置调整的归一化基准：FTS5 侧 ``-bm25`` 的典型跨度（179 条基线实测）
 SCORE_SPAN_REFERENCE = 20.0
@@ -105,6 +110,9 @@ _MILVUS_ERRORS = (MilvusUnavailable, MilvusIndexMissing)
 
 #: jieba 模块（首次 ``_column_tokens`` 时加载）
 _JIEBA: Any = None
+
+#: ``reranker`` 参数缺省哨兵：区分「没传」（按配置懒构造）与「显式 None」（测试里不重排）
+_RERANKER_UNSET: Any = object()
 
 
 def _docs():
@@ -191,6 +199,21 @@ def column_overlap_score(hit: "Hit", tokens: Sequence[str]) -> float:
     return total / COLUMN_SCORE_SPAN
 
 
+def _rerank_passage(hit: "Hit", max_chars: int) -> str:
+    """送进重排模型的单条 passage：``标题 > 小节`` 起头，后接正文（压空白、按上限截断）。
+
+    标题在前是有意的：重排模型对开头更敏感，而「标题 > 小节」正是 FTS5 时代列权重的语义
+    浓缩（正文里同样的标题被重复了三遍，但那只是 BM25 的活儿）。
+    """
+    head = " > ".join(part.strip() for part in (hit.title, hit.section) if part and part.strip())
+    body = " ".join((hit.body or "").split())
+    text = f"{head}\n{body}" if head else body
+    limit = int(max_chars or 0)
+    if limit > 0 and len(text) > limit:
+        return text[:limit]
+    return text
+
+
 def _escape(value: str) -> str:
     """Milvus 表达式里的字符串字面量：双引号与反斜杠会破坏表达式。"""
     return str(value).replace("\\", "").replace('"', "")
@@ -262,6 +285,11 @@ class RetrievalResult:
     sparse_ms: float = 0.0
     dense_ms: float = 0.0
     embed_ms: float = 0.0
+    rerank_ms: float = 0.0
+    reranked: int = 0  # 真正被重排模型改过名次的候选数（0 = 没跑或全部失败）
+    #: 重排降级标记（与 ``degraded`` 分开：稠密降级后稀疏一路照样可能重排成功，两个降级
+    #: 可以同时成立，用单值 ``degraded`` 会互相覆盖）
+    rerank_degraded: bool = False
     elapsed_ms: float = 0.0
 
     @property
@@ -343,6 +371,7 @@ class MilvusRetriever:
         settings: Settings | None = None,
         index: MilvusIndex | None = None,
         embedder: Any = None,
+        reranker: Any = _RERANKER_UNSET,
         dims: int = 0,
     ) -> None:
         self._settings = settings
@@ -350,6 +379,14 @@ class MilvusRetriever:
         self._index = index
         self._embedder = embedder
         self._embedder_ready = embedder is not None
+        if reranker is _RERANKER_UNSET:
+            self._reranker = None
+            self._reranker_ready = False
+            self._reranker_mode = ""
+        else:  # 注入的客户端（含显式 None）直接生效，测试不必碰真实配置
+            self._reranker = reranker
+            self._reranker_ready = True
+            self._reranker_mode = "auto"
         self._dims = int(dims or (settings.embedding.dims if settings is not None else 1024))
         self._lock = threading.Lock()
 
@@ -387,6 +424,30 @@ class MilvusRetriever:
                     self._embedder_ready = True
         return self._embedder
 
+    def _reranker_for(self, mode: str) -> Any:
+        """按模式取重排客户端（进程内复用；``off`` 不该走到这里）。
+
+        显式 ``mode=api`` 时即使配置写的是 ``off`` 也强制构造一次——评测要能拿
+        ``--rerank api`` 覆盖配置；构造不出来（缺 base_url/model）返回 None，由调用方
+        按「降级」处理。
+        """
+        if self._reranker_ready and self._reranker_mode == mode:
+            return self._reranker
+        with self._lock:
+            if self._reranker_ready and self._reranker_mode == mode:
+                return self._reranker
+            config = self.settings.rerank
+            if mode == "api" and config.mode == "off":
+                config = replace(config, mode="api")
+            try:
+                self._reranker = get_reranker(config)
+            except Exception as exc:  # noqa: BLE001 - 构造失败也只是重排降级
+                logger.warning("rerank 客户端构造失败，保留融合序：%s", exc)
+                self._reranker = None
+            self._reranker_mode = mode
+            self._reranker_ready = True
+            return self._reranker
+
     def close(self) -> None:
         embedder = self._embedder
         self._embedder = None
@@ -396,6 +457,15 @@ class MilvusRetriever:
                 embedder.close()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("关闭 embedding 客户端失败：%s", exc)
+        reranker = self._reranker
+        self._reranker = None
+        self._reranker_ready = False
+        self._reranker_mode = ""
+        if reranker is not None:
+            try:
+                reranker.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("关闭 rerank 客户端失败：%s", exc)
 
     # ---- 两路召回 ----
 
@@ -447,6 +517,81 @@ class MilvusRetriever:
             return None
         return vector
 
+    # ---- 重排 ----
+
+    def _resolve_rerank(self, rerank: str) -> str:
+        if rerank:
+            mode = rerank.strip().lower()
+        else:
+            try:
+                mode = str(self.settings.rerank.mode or "auto").strip().lower()
+            except Exception:  # noqa: BLE001 - 配置读不到就按未配置（auto 静默）处理
+                mode = "auto"
+        if mode not in RERANK_MODES:
+            raise ValueError(f"未知 rerank 模式：{mode!r}（可选 {'/'.join(RERANK_MODES)}）")
+        return mode
+
+    def _apply_rerank(
+        self,
+        query: str,
+        ranked: list[tuple[Hit, int, int | None, float | None]],
+        out: RetrievalResult,
+        *,
+        mode: str,
+    ) -> list[tuple[Hit, int, int | None, float | None]]:
+        """把融合序的前 ``rerank.top_n`` 条交给重排模型，返回带重排名次的新序。
+
+        返回值每项是 ``(hit, 融合名次, 重排名次或 None, 重排分或 None)``；失败/超时时原样
+        返回（只把 ``rerank_degraded`` 置上），**绝不**让检索失败。
+        """
+        if not ranked:
+            return []
+        try:
+            reranker = self._reranker_for(mode)
+            top_n = int(self.settings.rerank.top_n)
+            max_chars = int(self.settings.rerank.max_passage_chars)
+        except Exception as exc:  # noqa: BLE001 - 配置读不到 = 重排不可用
+            logger.warning("rerank 配置读取失败，保留融合序：%s", exc)
+            out.rerank_degraded = True
+            return list(ranked)
+        if reranker is None:
+            # auto 未配置是正常状态（静默）；api 未配置说明「以为开了其实没开」，必须留痕
+            if mode == "api":
+                out.rerank_degraded = True
+                logger.warning("rerank.mode=api 但客户端未配置（rerank.base_url/model），保留融合序")
+            return list(ranked)
+
+        head = ranked[: max(1, top_n)] if top_n > 0 else ranked
+        tail = ranked[len(head) :]
+        passages = [_rerank_passage(row[0], max_chars) for row in head]
+        tick = time.perf_counter()
+        try:
+            results = reranker.rerank(query, passages, top_n=len(passages))
+        except Exception as exc:  # noqa: BLE001 - 超时/网络/协议异常一律退回融合序
+            out.rerank_degraded = True
+            logger.warning("rerank 失败，保留融合序：%s", exc)
+            return list(ranked)
+        finally:
+            out.rerank_ms = round((time.perf_counter() - tick) * 1000, 1)
+        if not results:
+            out.rerank_degraded = True
+            return list(ranked)
+
+        reordered: list[tuple[Hit, int, int | None, float | None]] = []
+        seen: set[int] = set()
+        for index, score in results:
+            if not 0 <= int(index) < len(head) or int(index) in seen:
+                continue
+            seen.add(int(index))
+            row = head[int(index)]
+            reordered.append((row[0], row[1], len(reordered) + 1, float(score)))
+        # 服务端没返回的候选保持融合原序，接在重排结果之后（top_n 之外的也是）
+        for index, row in enumerate(head):
+            if index not in seen:
+                reordered.append((row[0], row[1], None, None))
+        out.reranked = len(seen)
+        return reordered + list(tail)
+
     # ---- 主入口 ----
 
     def search(
@@ -459,6 +604,7 @@ class MilvusRetriever:
         include_index: bool = False,
         retriever: str = "",
         pool_k: int | None = None,
+        rerank: str = "",
     ) -> RetrievalResult:
         config = self.config
         name = (retriever or config.default_retriever or "hybrid").strip().lower()
@@ -466,6 +612,7 @@ class MilvusRetriever:
             raise ValueError(
                 f"未知检索器：{name!r}（可选 {'/'.join(RETRIEVERS)}）"
             )
+        rerank_mode = self._resolve_rerank(rerank)
         started = time.perf_counter()
         out = RetrievalResult(retriever=name)
         # 只为本次会跑的路预置计数键：提前返回时诊断里也能看出「哪一路没跑/跑出 0 条」
@@ -566,25 +713,37 @@ class MilvusRetriever:
         )
         # 摘要用同一批 jieba 词：它比 FTS5 的单字/双字 token 更贴正文（别再切一次）
         tokens = column_tokens
+        # 融合序（名次 1 起）先定下来；重排改的是这个序，改完才做每篇上限与 limit 截断
+        # （设计 §8.6：截断在重排之后，否则排得再对也可能被截掉）
+        ordered = sorted(fused, key=lambda key: (-fused[key], key))
+        ranked: list[tuple[Hit, int, int | None, float | None]] = [
+            (by_pk[pk], position, None, None) for position, pk in enumerate(ordered, 1)
+        ]
+        if rerank_mode != "off":
+            ranked = self._apply_rerank(query, ranked, out, mode=rerank_mode)
         entries: list[dict[str, Any]] = []
-        for pk in sorted(fused, key=lambda key: (-fused[key], key)):
-            hit = by_pk[pk]
-            sources = "+".join(sorted(route for route, ranks in route_ranks.items() if pk in ranks))
-            entries.append(
-                {
-                    "wiki_path": hit.path,
-                    "kind": hit.kind,
-                    "section": hit.section,
-                    "title": hit.title,
-                    "mode": hit.mode,
-                    "version": hit.version,
-                    "score": round(fused[pk], 5),
-                    "snippet": _docs()._excerpt(hit.body, tokens, SNIPPET_WIDTH),
-                    "sources": sources,
-                    "sparse_rank": route_ranks.get("sparse", {}).get(pk),
-                    "dense_rank": route_ranks.get("dense", {}).get(pk),
-                }
+        for hit, fused_rank, rerank_rank, rerank_score in ranked:
+            sources = "+".join(
+                sorted(route for route, ranks in route_ranks.items() if hit.pk in ranks)
             )
+            entry: dict[str, Any] = {
+                "wiki_path": hit.path,
+                "kind": hit.kind,
+                "section": hit.section,
+                "title": hit.title,
+                "mode": hit.mode,
+                "version": hit.version,
+                "score": round(fused[hit.pk], 5),
+                "snippet": _docs()._excerpt(hit.body, tokens, SNIPPET_WIDTH),
+                "sources": sources,
+                "sparse_rank": route_ranks.get("sparse", {}).get(hit.pk),
+                "dense_rank": route_ranks.get("dense", {}).get(hit.pk),
+                "fused_rank": fused_rank,
+            }
+            if rerank_rank is not None:
+                entry["rerank_rank"] = rerank_rank
+                entry["rerank_score"] = rerank_score
+            entries.append(entry)
         doc_index = _docs()
         out.entries = doc_index._finalize(entries, max(1, int(limit)), prefix=doc_index.WIKI_DIRNAME)
         out.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)

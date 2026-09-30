@@ -27,7 +27,7 @@ from app.agent.milvus_index import (
     MilvusIndex,
     MilvusUnavailable,
 )
-from app.config import EmbeddingConfig, RetrievalConfig, Settings
+from app.config import EmbeddingConfig, RerankConfig, RetrievalConfig, Settings
 from test_milvus_build import DIMS, FakeEmbedder, make_builder
 
 
@@ -144,12 +144,25 @@ class StubIndex:
         return [c["filter"] for c in self.calls if c["field"] == field]
 
 
-def make_retriever(index, *, embedder=None, retriever_config: RetrievalConfig | None = None):
+def make_retriever(
+    index,
+    *,
+    embedder=None,
+    retriever_config: RetrievalConfig | None = None,
+    reranker=rt._RERANKER_UNSET,
+    rerank_config=None,
+):
     config = retriever_config or RetrievalConfig()
     # 传一份「未配置 embedding」的 Settings：否则 embedder=None 时产品会读真实 config.yaml
-    # 建出真客户端并打网络（测试绝不允许）。
-    settings = Settings(retrieval=config, embedding=EmbeddingConfig())
-    return rt.MilvusRetriever(config, settings=settings, index=index, embedder=embedder)
+    # 建出真客户端并打网络（测试绝不允许）。rerank 同理：默认未配置 → auto 静默跳过。
+    settings = Settings(
+        retrieval=config,
+        embedding=EmbeddingConfig(),
+        rerank=rerank_config or RerankConfig(),
+    )
+    return rt.MilvusRetriever(
+        config, settings=settings, index=index, embedder=embedder, reranker=reranker
+    )
 
 
 # ---------------------------------------------------------------- 纯函数
@@ -399,7 +412,7 @@ def built(tmp_path: Path):
     builder.build(mode="rebuild")
     index = MilvusIndex(config, dims=DIMS, path_override=Path(config.milvus_path))
     retriever = rt.MilvusRetriever(
-        config, index=index, embedder=QueryEmbedder(), dims=DIMS
+        config, index=index, embedder=QueryEmbedder(), dims=DIMS, reranker=None
     )
     try:
         yield retriever, config
@@ -438,6 +451,140 @@ def test_real_index_dense_and_hybrid_have_no_degradation(built) -> None:
     assert hybrid.degraded == ""
     assert hybrid.pool["sparse"] >= 1 and hybrid.pool["dense"] >= 1
     assert all(e["sources"] for e in hybrid.entries)
+
+
+# ---------------------------------------------------------------- 后置重排
+
+
+class StubReranker:
+    """桩重排客户端：记录调用、可按脚本给名次、可指定失败。"""
+
+    def __init__(self, order: list[int] | None = None, error: Exception | None = None) -> None:
+        self.order = order
+        self.error = error
+        self.calls: list[dict] = []
+        self.closed = False
+
+    def rerank(self, query: str, documents, *, top_n: int = 0):
+        self.calls.append({"query": query, "documents": list(documents), "top_n": top_n})
+        if self.error is not None:
+            raise self.error
+        order = self.order if self.order is not None else list(range(len(documents)))
+        return [(index, 1.0 - position * 0.01) for position, index in enumerate(order)]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _three_hits() -> StubIndex:
+    # 归一化距离排序 = pk1, pk2, pk3（融合名次 1/2/3）
+    return StubIndex(sparse=[hit(1, 5.0), hit(2, 3.0), hit(3, 1.0)])
+
+
+def test_rerank_reorders_entries_and_labels_both_ranks() -> None:
+    stub = StubReranker(order=[2, 0, 1])
+    result = make_retriever(_three_hits(), reranker=stub).search(
+        "分区表", retriever="sparse", limit=5
+    )
+    assert [e["path"] for e in result.entries] == [
+        "ob_wiki/dir/pk3.md",
+        "ob_wiki/dir/pk1.md",
+        "ob_wiki/dir/pk2.md",
+    ]
+    assert [e["rerank_rank"] for e in result.entries] == [1, 2, 3]
+    assert [e["fused_rank"] for e in result.entries] == [3, 1, 2]
+    assert result.reranked == 3
+    assert result.rerank_degraded is False
+    assert result.degraded == "" and result.ok
+    assert stub.calls[0]["query"] == "分区表" and stub.calls[0]["top_n"] == 3
+
+
+def test_rerank_passage_starts_with_title_and_section() -> None:
+    stub = StubReranker()
+    make_retriever(_three_hits(), reranker=stub).search("分区表", retriever="sparse")
+    first = stub.calls[0]["documents"][0]
+    assert first.startswith("dir/pk1.md 标题 > 小节")
+    assert "正文内容" in first
+
+
+def test_rerank_happens_before_limit_truncation() -> None:
+    """被重排提到第 1 的候选融合名次是 3：先截断的话它会先被丢掉。"""
+    stub = StubReranker(order=[2, 0, 1])
+    result = make_retriever(_three_hits(), reranker=stub).search(
+        "分区表", retriever="sparse", limit=1
+    )
+    assert [e["path"] for e in result.entries] == ["ob_wiki/dir/pk3.md"]
+    assert result.entries[0]["fused_rank"] == 3
+
+
+def test_rerank_only_touches_top_n_and_keeps_rest_in_fused_order() -> None:
+    stub = StubReranker()
+    result = make_retriever(
+        _three_hits(),
+        reranker=stub,
+        rerank_config=RerankConfig(base_url="http://x", model="m", top_n=1),
+    ).search("分区表", retriever="sparse", limit=5)
+    assert len(stub.calls[0]["documents"]) == 1
+    assert result.reranked == 1
+    assert [e["path"] for e in result.entries] == [
+        "ob_wiki/dir/pk1.md",
+        "ob_wiki/dir/pk2.md",
+        "ob_wiki/dir/pk3.md",
+    ]
+    assert result.entries[0]["rerank_rank"] == 1
+    assert "rerank_rank" not in result.entries[1]
+
+
+def test_rerank_failure_keeps_fused_order_and_marks_degraded() -> None:
+    stub = StubReranker(error=RuntimeError("重排炸了"))
+    result = make_retriever(_three_hits(), reranker=stub).search("分区表", retriever="sparse")
+    assert [e["path"] for e in result.entries] == [
+        "ob_wiki/dir/pk1.md",
+        "ob_wiki/dir/pk2.md",
+        "ob_wiki/dir/pk3.md",
+    ]
+    assert result.rerank_degraded is True
+    assert result.reranked == 0 and result.rerank_ms >= 0
+    assert result.degraded == ""  # 重排降级不该污染检索降级（两路本身是好的）
+    assert all("rerank_rank" not in e for e in result.entries)
+
+
+def test_rerank_off_never_touches_the_client() -> None:
+    stub = StubReranker(error=RuntimeError("不该被调用"))
+    result = make_retriever(_three_hits(), reranker=stub).search(
+        "分区表", retriever="sparse", rerank="off"
+    )
+    assert stub.calls == []
+    assert result.reranked == 0 and result.rerank_degraded is False
+    assert all(e["fused_rank"] == i for i, e in enumerate(result.entries, 1))
+
+
+def test_rerank_api_mode_without_configuration_marks_degraded() -> None:
+    result = make_retriever(_three_hits(), reranker=None).search(
+        "分区表", retriever="sparse", rerank="api"
+    )
+    assert result.rerank_degraded is True and result.reranked == 0
+    assert len(result.entries) == 3  # 结果照常返回，只是没重排
+
+
+def test_rerank_auto_mode_without_configuration_is_silent() -> None:
+    result = make_retriever(_three_hits(), reranker=None).search(
+        "分区表", retriever="sparse", rerank="auto"
+    )
+    assert result.rerank_degraded is False and result.reranked == 0
+
+
+def test_unknown_rerank_mode_raises() -> None:
+    with pytest.raises(ValueError, match="未知 rerank 模式"):
+        make_retriever(_three_hits()).search("分区表", retriever="sparse", rerank="bogus")
+
+
+def test_close_closes_reranker() -> None:
+    stub = StubReranker()
+    retriever = make_retriever(_three_hits(), reranker=stub)
+    retriever.search("分区表", retriever="sparse")
+    retriever.close()
+    assert stub.closed is True
 
 
 # ---------------------------------------------------------------- doc_index 接入

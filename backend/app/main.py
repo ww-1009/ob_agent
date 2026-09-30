@@ -1,6 +1,7 @@
 """FastAPI 应用装配。create_app 便于测试注入 stub 模型/客户端。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -44,6 +45,31 @@ def _warn_if_multi_worker(settings: Settings) -> None:
             return
 
 
+async def _warmup_retrieval() -> None:
+    """启动时预热检索：否则进程内第一次检索要多付 ~2s（jieba 载入 571ms + 打开索引 + 首查）。
+
+    只走稀疏一路：它覆盖所有通道共有的固定开销（分词器 + Milvus Lite 打开 + BM25 首查），
+    又不引入启动期的外部网络依赖（稠密那一路要调 embedding API）。
+    失败只告警——检索层本身有降级策略（索引打不开 → 空结果 + degraded），预热失败不该让后端起不来。
+    """
+
+    def _warm() -> None:
+        from app.agent import retrieval as retrieval_module
+        from app.config import load_settings
+
+        path = load_settings().retrieval.resolve_milvus_path()
+        if not path.exists():
+            logger.debug("未找到 Milvus 索引库 %s，跳过检索预热", path)
+            return
+        retrieval_module.get_retriever().search("预热", limit=1, retriever="sparse", rerank="off")
+
+    try:
+        await asyncio.to_thread(_warm)
+        logger.info("检索预热完成（分词器与 Milvus Lite 已就绪）")
+    except Exception as exc:  # noqa: BLE001 - 预热是尽力而为
+        logger.warning("检索预热失败（首次检索会更慢，不影响可用性）：%s", exc)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -74,6 +100,8 @@ def create_app(
             runtime, error = await open_memory(settings.memory)
         app.state.memory = runtime
         app.state.memory_error = error
+        # 检索预热放在 ready 之前：探活通过时检索已经能按热路径延迟服务（见 _warmup_retrieval）
+        await _warmup_retrieval()
         try:
             yield
         finally:

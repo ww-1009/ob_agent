@@ -253,6 +253,7 @@ class DocIndex:
         version: str = "",
         include_index: bool = False,
         retriever: str = "",
+        rerank: str = "",
     ) -> list[dict[str, Any]]:
         """检索文档小节（Milvus 三路，见 ``app.agent.retrieval``）。
 
@@ -261,7 +262,9 @@ class DocIndex:
         （导航页抢 top1 是硬门禁，见设计文档 §8.2）。
 
         ``retriever`` 选引擎：``""``（默认）用配置 ``retrieval.default_retriever``，
-        或显式 ``sparse`` / ``dense`` / ``hybrid``。
+        或显式 ``sparse`` / ``dense`` / ``hybrid``。``rerank`` 同理：``""`` 用配置
+        ``rerank.mode``（``auto`` 时配置齐了就重排），或显式 ``auto`` / ``off`` / ``api``
+        —— 评测要量「没有重排」的基线必须显式传 ``off``。
         """
         if not query or not query.strip():
             raise DocIndexError("query 不能为空")
@@ -281,6 +284,7 @@ class DocIndex:
             auto_mode=auto_mode,
             auto_version=auto_version,
             include_index=include_index,
+            rerank=rerank,
         )
 
     def _search_milvus(
@@ -294,6 +298,7 @@ class DocIndex:
         auto_mode: str,
         auto_version: str,
         include_index: bool,
+        rerank: str = "",
     ) -> list[dict[str, Any]]:
         """Milvus 三路检索：降级只记日志、返回已有结果，任何意外都不下发成 500。"""
         from app.agent import retrieval as retrieval_module
@@ -308,6 +313,7 @@ class DocIndex:
                 version=version,
                 include_index=include_index,
                 retriever=engine,
+                rerank=rerank,
             )
             if not result.entries and (auto_mode or auto_version):
                 # 自动消歧后一条不剩就退回不过滤，与 search() 的注释同口径
@@ -316,6 +322,7 @@ class DocIndex:
                     limit=limit,
                     include_index=include_index,
                     retriever=engine,
+                    rerank=rerank,
                 )
                 if retry.entries:
                     result = retry
