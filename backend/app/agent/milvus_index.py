@@ -239,6 +239,12 @@ def _lock_error_hint(path: Path) -> str:
 def open_client(path: Path | str) -> MilvusClient:
     """打开（必要时创建）data_dir。失败统一抛 ``MilvusUnavailable``（带可操作提示）。"""
     target = Path(path)
+    # milvus-lite 只认「以 .db 结尾」的本地路径（M4 实测：plain.milvus / noext 都被拒），
+    # 配置里写错后缀会得到一句很绕的 ConnectionConfigException，这里提前说清楚。
+    if target.suffix != ".db":
+        raise MilvusUnavailable(
+            f"Milvus data_dir 路径必须以 .db 结尾（milvus-lite 的硬要求）：{target}"
+        )
     if not target.parent.is_dir():
         raise MilvusUnavailable(f"Milvus data_dir 的父目录不存在：{target.parent}")
     try:
@@ -290,11 +296,15 @@ class MilvusIndex:
     config: RetrievalConfig
     dims: int = 1024
     embedding_model: str = ""
+    #: 指向别处（M4 的临时构建目录）；None 时用 ``config.resolve_milvus_path()``。
+    path_override: Path | str | None = None
     _client: MilvusClient | None = field(default=None, repr=False, compare=False)
     _loaded: set[str] = field(default_factory=set, repr=False, compare=False)
 
     @property
     def path(self) -> Path:
+        if self.path_override is not None:
+            return Path(self.path_override)
         return self.config.resolve_milvus_path()
 
     @property
@@ -372,6 +382,39 @@ class MilvusIndex:
         if limit is not None:
             kwargs["limit"] = int(limit)
         return self.client.query(name, **kwargs)
+
+    def query_iterator(
+        self,
+        *,
+        filter: str = "",
+        output_fields: Sequence[str] | None = None,
+        batch_size: int = 1000,
+        collection: str | None = None,
+    ) -> Any:
+        """全库遍历（``query`` 单次最多 16384 条，枚举旧 pk 做增量剪枝必须用迭代器）。"""
+        name = collection or self.config.collection
+        self._ensure_loaded(name)
+        return self.client.query_iterator(
+            name, batch_size=int(batch_size), filter=filter, output_fields=list(output_fields or [])
+        )
+
+    def upsert(
+        self, entities: Sequence[Mapping[str, Any]], *, collection: str | None = None
+    ) -> Any:
+        """写入/覆盖行（M4 构建用）。``upsert`` 的每一行都必须带向量。"""
+        if not entities:
+            return None
+        name = collection or self.config.collection
+        self._ensure_loaded(name)
+        return self.client.upsert(name, list(entities))
+
+    def delete(self, expr: str, *, collection: str | None = None) -> Any:
+        """按表达式删除（M4 剪枝用，形如 ``pk in [1, 2]``）。"""
+        if not expr:
+            return None
+        name = collection or self.config.collection
+        self._ensure_loaded(name)
+        return self.client.delete(name, filter=expr)
 
     def exists(self) -> bool:
         return self.path.is_dir()
@@ -640,6 +683,45 @@ def _render(stats: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _run_build(settings: Any, *, mode: str, args: Any, json_out: bool) -> int:
+    """``--rebuild`` / ``--rebuild-vectors`` / ``--incremental`` 的入口（M4）。"""
+    import json
+
+    from .embedding import get_embedding_client
+    from .milvus_build import MilvusBuilder
+
+    retrieval = settings.retrieval
+    embedding = settings.embedding
+    embedder = None if args.no_vectors else get_embedding_client(embedding)
+    builder = MilvusBuilder(
+        retrieval,
+        embedder=embedder,
+        wiki_dir=args.wiki_dir or None,
+        dims=embedding.dims,
+        embedding_model=embedding.model,
+    )
+    try:
+        stats = builder.build(
+            mode=mode,
+            limit=args.limit,
+            vectors=not args.no_vectors,
+            progress=None if json_out else print,
+        )
+    except MilvusUnavailable as exc:
+        payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        print(json.dumps(payload, ensure_ascii=False, indent=1) if json_out else f"错误：{exc}")
+        return 1
+    finally:
+        if embedder is not None:
+            embedder.close()
+    payload = {"ok": True, **stats.as_dict()}
+    if json_out:
+        print(json.dumps(payload, ensure_ascii=False, indent=1, default=str))
+    else:
+        pass  # progress 已经把每条消息打过了，这里不再重复
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
     import json
@@ -648,10 +730,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--stats", action="store_true", help="打印集合统计与元数据")
     parser.add_argument("--health", action="store_true", help="打印 /api/health 口径的检索状态")
     parser.add_argument("--verify", action="store_true", help="校验 data_dir 可打开、集合与 ob_meta 一致")
+    parser.add_argument("--rebuild", action="store_true", help="全量重扫重建；未变的块复用向量")
+    parser.add_argument("--rebuild-vectors", action="store_true", help="全量重打向量（换模型/dims 后用）")
+    parser.add_argument("--incremental", action="store_true", help="只补增量（默认行为）")
+    parser.add_argument("--limit", type=int, default=0, help="只构建前 N 个文件（冒烟/自测用）")
+    parser.add_argument("--no-vectors", action="store_true", help="只建稀疏索引（CI 无密钥通道）")
+    parser.add_argument("--wiki-dir", default="", help="语料目录（默认 backend/doc/ob_wiki）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    build_mode = ""
+    if args.rebuild_vectors:
+        build_mode = "rebuild-vectors"
+    elif args.rebuild:
+        build_mode = "rebuild"
+    elif args.incremental:
+        build_mode = "incremental"
+
     settings = load_settings()
+    if build_mode:
+        return _run_build(settings, mode=build_mode, args=args, json_out=args.json)
+
     index = get_milvus_index(settings)
     try:
         if args.verify:

@@ -70,7 +70,7 @@
 | 同义词 | FTS5 召回路 | **查询扩展**（把同义词追加进 query 文本） |
 | 导航惩罚 / 版本奖励 | `_rank` 内部 | **取回后置调整**（§8.4），常数保留 |
 | 后端可替换 | `VectorIndex` 协议 + `sqlite_numpy` 回退 | 单后端，删除协议与回退（-1.5 人日） |
-| 索引存储 | `ob_wiki.index.db` 67.6 MB | `ob_wiki.milvus/` ≈ 240 MB |
+| 索引存储 | `ob_wiki.index.db` 67.6 MB | `ob_wiki.milvus.db/` ≈ 240 MB（目录名必须 .db 结尾） |
 | 索引版本 | `SCHEMA_VERSION` + `meta` 表 | `schema_version` + `ob_meta` 集合 |
 | 依赖 | 0 新增（stdlib sqlite3） | +359 MB（milvus-lite/faiss/pyarrow/grpcio/jieba…） |
 | 回退 | `provider=bm25` 一键回退 | **无配置级回退**（见 §14.3） |
@@ -281,8 +281,8 @@ ip.add_index("kind",    index_type="INVERTED")
 
 ### 5.4 data_dir 与原子重建
 
-- data_dir：`backend/doc/ob_wiki.milvus/`（**目录**，`.gitignore` 的 `/backend/doc/*` 已覆盖）。
-- 原子重建：临时目录构建 → 关闭 client → **目录级重命名/切换**（Milvus 是 LSM，不能像单文件那样 `os.replace` 一个文件；必须整目录切换）。
+- data_dir：`backend/doc/ob_wiki.milvus.db`（**目录，但必须叫 `*.db`**：milvus-lite 3.2.1 只接受以 `.db` 结尾的本地路径，`ob_wiki.milvus` / 无后缀都会被 `ConnectionConfigException: uri ... or a local file endswith [.db]` 拒掉；父目录必须已存在）。`.gitignore` 的 `/backend/doc/*` 已覆盖。
+- 原子重建：临时目录构建 → 关闭 client → **目录级重命名/切换**（Milvus 是 LSM，不能像单文件那样 `os.replace` 一个文件；必须整目录切换）。旁路目录同样以 `.db` 结尾（`ob_wiki.milvus.building-<pid>.db` / `.old-<pid>.db`）。
 - **单进程约束**：同一 data_dir 只能被一个进程打开（实测文件锁）。启动时显式校验并给出明确报错；`uvicorn --workers 1`，禁 `--reload`/preload（gRPC + fork 警告，见 §3.2）。
 
 ---
@@ -291,7 +291,7 @@ ip.add_index("kind",    index_type="INVERTED")
 
 ```yaml
 retrieval:
-  milvus_path: backend/doc/ob_wiki.milvus   # data_dir（目录）
+  milvus_path: backend/doc/ob_wiki.milvus.db  # data_dir（必须 .db 结尾，milvus-lite 硬要求）
   collection: ob_chunks
   meta_collection: ob_meta
   dense_index: IVF_FLAT                     # IVF_FLAT | HNSW | FLAT
@@ -338,6 +338,7 @@ rerank:               # P2a，与 v1 一致
 | `rerank.mode: api` 且 `rerank.model` / `base_url` 为空 | **启动失败** |
 | `embedding.model` 非空但 `base_url` 为空 | **启动失败** |
 | `milvus_path` 不存在 | 启动时提示"需先建索引"，检索返回空 + `retrieval_degraded` |
+| `milvus_path` 不以 `.db` 结尾 | **启动失败**（milvus-lite 只认 `.db` 后缀，提前报清楚而不是抛底层 ConnectionConfigException） |
 | data_dir 被其他进程占用 | **启动失败**，报错写明 `--workers 1` 约束 |
 | `ob_meta.dims` 与 `embedding.dims` 不一致 | 启动失败，提示需 `--rebuild-vectors` |
 
@@ -346,18 +347,22 @@ rerank:               # P2a，与 v1 一致
 ## 7. 索引构建与增量
 
 ```
-python -m app.agent.milvus_index --rebuild           # 全量重建（临时目录 → 原子切换）
-python -m app.agent.milvus_index --rebuild-vectors   # 增量补向量（默认）
-python -m app.agent.milvus_index --stats             # rows / coverage / dims / model / size
-python -m app.agent.milvus_index --verify            # 两路可查 + meta 一致性
+python -m app.agent.milvus_index --incremental        # 增量（默认；指纹未变整库跳过）
+python -m app.agent.milvus_index --rebuild            # 全量重建（临时目录 → 原子切换）
+python -m app.agent.milvus_index --rebuild-vectors    # 忽略旧哈希，全量重打向量
+python -m app.agent.milvus_index --no-vectors         # 无密钥通道：只建稀疏索引
+python -m app.agent.milvus_index --stats              # rows / coverage / dims / model / size
+python -m app.agent.milvus_index --verify             # 两路可查 + meta 一致性
+python -m app.agent.milvus_index --help               # --limit N / --wiki-dir DIR / --json
 ```
 
 流程：
 
 1. 扫描 `backend/doc/ob_wiki` → 解析 frontmatter → `_split_chunks`（**沿用现有实现**，39 行不动）。
 2. 生成 `pk = xxh64(path#section#seq)` 与 `content_hash`（基于最终 `text`）；`seq` 为同一小节内的块序号（见 §5.1）。
-3. **增量判定**：从 `ob_chunks` 查回现有 `pk → content_hash`，只对「新增」或「哈希变化」的块调用 embedding；未变的块**跳过费用**。
+3. **增量判定**：用 `query_iterator` 扫全库拿 `pk → content_hash`（扫全库才能发现已删除文件的待剪枝 pk）；只对「新增」或「哈希变化」的块调用 embedding；未变的块**跳过费用**。`content_hash` = `sha256(canonical)[:16] + sha256(text)[:16]`——canonical 不含加权前缀，所以 M6 调 `TITLE_REPEAT`/`KEYWORD_REPEAT` 时只重写 `text` 并**复用旧向量**（构建指纹里带 `:t3k2` 权重签名，让这种情况不会误走整库短路）；`embedding_model` 变了则整库重打向量。
 4. 组装行：`text` = `{标题前缀重复} > {小节} | {正文}`（§8.2 的权重复刻），`text` 与 `vector` 一起 `upsert`。
+   - **超长块截断（M4 实测必须）**：`_split_chunks` 对**没有 H2/H3 的文件**走「`h1 or 正文` 整篇一块」兜底，绕过了 1800 字切分——真语料里有 6 篇这样的文件（8k–40k 字，`obshell/错误码.md` 最大 40363 字），Milvus 直接 `code=6, VARCHAR field 'text' value length 16189 exceeds max_length=8000` 拒收，embedding 也会超模型输入上限。构建侧按 `retrieval.max_text_bytes`（默认 8000 **字节**，比 schema 的字符上限保守）截断并补 `…`，`BuildStats.truncated` 记账。**给 M6/M7 的遗留项**：根治办法是让 `_split_chunks` 的兜底路径也走 1800 字硬切，但那会改变 FTS5 的召回结果、让已测的 179 条基线不可比，因此留到 M7 删 FTS5 之后再做。
 5. **剪枝**：删除本次不再存在的 `pk`（文件被删/小节改名）：`delete(filter="pk in [...]")` 分批执行。
 6. 写入 `ob_meta`：`schema_version` / `corpus_fingerprint` / `embedding_model` / `dims` / `analyzer` / `built_at`。
 7. 原子切换临时目录。

@@ -56,7 +56,7 @@ auth:
 retrieval:
   # 检索后端（Milvus Lite 单引擎：内建 BM25 稀疏 + FLOAT_VECTOR 稠密）。
   # milvus_path 相对路径按 backend/ 解析，不随启动目录漂移。
-  milvus_path: "doc/ob_wiki.milvus"
+  milvus_path: "doc/ob_wiki.milvus.db"   # milvus-lite 要求路径以 .db 结尾
   collection: "ob_chunks"
   meta_collection: "ob_meta"
   analyzer: "jieba"            # milvus-lite 3.2.1 的中文分析器类型名必须是 jieba（不是 chinese）

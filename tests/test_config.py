@@ -131,7 +131,7 @@ def test_confirm_timeout_must_be_positive(tmp_path):
 
 def test_retrieval_defaults_when_no_file():
     s = load_settings(config_path=_MISSING_CONFIG, env={"OCP_PROVIDER": "mock"})
-    assert s.retrieval.milvus_path == "doc/ob_wiki.milvus"
+    assert s.retrieval.milvus_path == "doc/ob_wiki.milvus.db"
     assert s.retrieval.collection == "ob_chunks"
     assert s.retrieval.meta_collection == "ob_meta"
     assert s.retrieval.analyzer == "jieba"
@@ -248,7 +248,7 @@ def test_resolve_milvus_path_is_anchored_to_backend_dir():
 
     p = RetrievalConfig().resolve_milvus_path()
     assert p.is_absolute()
-    assert p == Path(__file__).resolve().parent.parent / "backend" / "doc" / "ob_wiki.milvus"
+    assert p == Path(__file__).resolve().parent.parent / "backend" / "doc" / "ob_wiki.milvus.db"
 
 
 # ---- rerank 协议形态（实测：阿里云百炼 compatible-mode/v1 下没有 /rerank，只有原生形态）----

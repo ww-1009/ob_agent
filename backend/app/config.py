@@ -229,7 +229,7 @@ class RetrievalConfig:
     改为 "hybrid"（在那之前保持 "fts5" 才能与现有行为逐条比对）。
     """
 
-    milvus_path: str = "doc/ob_wiki.milvus"
+    milvus_path: str = "doc/ob_wiki.milvus.db"   # milvus-lite 只认 .db 结尾的本地路径
     collection: str = "ob_chunks"
     meta_collection: str = "ob_meta"
     analyzer: str = "jieba"        # milvus-lite 3.2.1 的中文分析器类型名必须是 jieba
@@ -492,7 +492,7 @@ def load_settings(
         ),
         retrieval=RetrievalConfig(
             milvus_path=_env_nonempty(env, "RETRIEVAL_MILVUS_PATH")
-            or retrieval_y.get("milvus_path", "doc/ob_wiki.milvus"),
+            or retrieval_y.get("milvus_path", "doc/ob_wiki.milvus.db"),
             collection=_env_nonempty(env, "RETRIEVAL_COLLECTION")
             or retrieval_y.get("collection", "ob_chunks"),
             meta_collection=_env_nonempty(env, "RETRIEVAL_META_COLLECTION")
