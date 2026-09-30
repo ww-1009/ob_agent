@@ -300,3 +300,85 @@ def test_embedding_batch_size_default_is_under_provider_limit():
 
     # DashScope 兼容模式硬上限 20（超限 400），默认必须留余量
     assert EmbeddingConfig().batch_size <= 20
+
+
+# ---- 应用日志（M9：日志持久化）----
+
+
+def test_logging_defaults_are_set():
+    from app.config import LoggingConfig
+
+    cfg = LoggingConfig()
+    assert cfg.level == "INFO"
+    assert cfg.file == "logs/app.log"
+    assert cfg.max_bytes == 5_000_000
+    assert cfg.backups == 5
+    assert cfg.console is True
+    assert cfg.third_party_level == "WARNING"
+
+
+def test_logging_section_loaded_from_yaml(tmp_path):
+    path = _write_yaml(
+        tmp_path,
+        "logging:\n  file: logs/other.log\n  level: DEBUG\n  max_bytes: 1024\n"
+        "  backups: 2\n  console: false\n  third_party_level: ERROR\n",
+    )
+    cfg = load_settings(config_path=path, env={}).logging
+    assert cfg.file == "logs/other.log"
+    assert cfg.level == "DEBUG"
+    assert cfg.max_bytes == 1024
+    assert cfg.backups == 2
+    assert cfg.console is False
+    assert cfg.third_party_level == "ERROR"
+
+
+def test_logging_env_overrides_yaml(tmp_path):
+    path = _write_yaml(tmp_path, "logging:\n  file: logs/other.log\n  level: DEBUG\n")
+    cfg = load_settings(
+        config_path=path,
+        env={"LOG_FILE": "/tmp/env.log", "LOG_LEVEL": "warning", "LOG_CONSOLE": "false"},
+    ).logging
+    assert cfg.file == "/tmp/env.log"
+    assert cfg.level == "warning"      # 大小写不敏感，启动时统一 upper 校验
+    assert cfg.console is False
+
+
+def test_logging_env_empty_string_does_not_clobber_yaml(tmp_path):
+    path = _write_yaml(tmp_path, "logging:\n  file: logs/other.log\n  level: DEBUG\n")
+    cfg = load_settings(config_path=path, env={"LOG_FILE": "", "LOG_LEVEL": ""}).logging
+    assert cfg.file == "logs/other.log"
+    assert cfg.level == "DEBUG"
+
+
+def test_logging_level_validation_rejects_unknown(tmp_path):
+    path = _write_yaml(tmp_path, "logging:\n  level: verbose\n")
+    with pytest.raises(ValueError) as ei:
+        load_settings(config_path=path, env={})
+    assert "不是合法日志级别" in str(ei.value)
+
+
+def test_logging_unknown_env_level_is_rejected():
+    # setLevel 对写错的级别名静默失效，所以必须在启动时 fail fast
+    with pytest.raises(ValueError):
+        load_settings(config_path=_MISSING_CONFIG, env={"LOG_LEVEL": "nonsense"})
+
+
+def test_logging_blank_file_disables_file_handler(tmp_path):
+    path = _write_yaml(tmp_path, "logging:\n  file: ''\n")
+    assert load_settings(config_path=path, env={}).logging.resolve_file_path() is None
+
+
+def test_logging_zero_limits_are_preserved(tmp_path):
+    """0 表示「不轮转 / 不留备份」，不能被 `or` 兜底成默认值。"""
+    path = _write_yaml(tmp_path, "logging:\n  max_bytes: 0\n  backups: 0\n")
+    cfg = load_settings(config_path=path, env={}).logging
+    assert cfg.max_bytes == 0
+    assert cfg.backups == 0
+
+
+def test_resolve_log_path_is_anchored_to_backend_dir():
+    from app.config import LoggingConfig
+
+    p = LoggingConfig(file="logs/app.log").resolve_file_path()
+    assert p is not None and p.is_absolute()
+    assert p == Path(__file__).resolve().parent.parent / "backend" / "logs" / "app.log"

@@ -6,6 +6,7 @@ env=None 时先加载 backend/.env（若存在）再读 os.environ。
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -259,6 +260,34 @@ _ALLOWED_RETRIEVERS = ("sparse", "dense", "hybrid")
 
 
 @dataclass
+class LoggingConfig:
+    """应用日志（标准库 logging）：默认落盘 ``backend/logs/app.log``，按大小轮转。
+
+    file 相对 ``backend/`` 解析（锚点同 ``RetrievalConfig.resolve_milvus_path``），不随启动
+    CWD 漂移；``file: ""`` 表示关闭文件日志、只打控制台。
+    ``max_bytes <= 0`` 不轮转；``backups`` 是保留的历史文件数（``app.log.1`` …）。
+
+    已知限制：``RotatingFileHandler`` 不是多进程安全的。服务端已强制单 worker
+    （``backend/run.sh --workers 1``：HITL 确认通道、同 thread 串行锁、进程内单例
+    Milvus Lite 都依赖它）；需要多 worker 时应改走 journald 或按 pid 分文件。
+    """
+
+    level: str = "INFO"
+    file: str = "logs/app.log"
+    max_bytes: int = 5_000_000    # 单文件上限，超过即轮转
+    backups: int = 5              # 保留 app.log.1 … app.log.N
+    console: bool = True          # 应用日志是否同时打 stderr（systemd 下进 journald）
+    third_party_level: str = "WARNING"   # 压 pymilvus/grpc/httpx 等噪声的级别
+
+    def resolve_file_path(self) -> Path | None:
+        """把 file 解析成绝对路径；空串（关闭文件日志）返回 None。"""
+        if not self.file.strip():
+            return None
+        p = Path(self.file)
+        return p if p.is_absolute() else Path(__file__).resolve().parent.parent / p
+
+
+@dataclass
 class Settings:
     ocp: OcpConfig = field(default_factory=OcpConfig)
     sql_ro: SqlConfig = field(default_factory=SqlConfig)
@@ -269,6 +298,7 @@ class Settings:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     rerank: RerankConfig = field(default_factory=RerankConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 def _default_config_path() -> Path:
@@ -369,6 +399,22 @@ def _validate_retrieval(settings: Settings) -> None:
         )
 
 
+def _validate_logging(cfg: LoggingConfig) -> None:
+    """校验日志配置（fail fast）。
+
+    level/third_party_level 必须是 logging 认识的级别名：写错时 ``setLevel`` 不会报错，
+    而是静默失效（等于保持原级别），用户会以为「配了 DEBUG 却没详细日志」，所以在启动时
+    就报出来。max_bytes/backups 允许 <=0（不轮转 / 不留备份），不做下界校验。
+    """
+    known = sorted(logging.getLevelNamesMapping())
+    for name, value in (
+        ("logging.level", cfg.level),
+        ("logging.third_party_level", cfg.third_party_level),
+    ):
+        if str(value).strip().upper() not in logging.getLevelNamesMapping():
+            raise ValueError(f"{name} 不是合法日志级别：{value!r}（可选 {known}）")
+
+
 def load_settings(
     config_path: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -395,10 +441,21 @@ def load_settings(
     retrieval_y = data.get("retrieval", {}) or {}
     embedding_y = data.get("embedding", {}) or {}
     rerank_y = data.get("rerank", {}) or {}
+    logging_y = data.get("logging", {}) or {}
 
     verify_ssl_env = _env_nonempty(env, "OCP_VERIFY_SSL")
     send_row_data_env = _env_nonempty(env, "SEND_ROW_DATA")
     memory_enabled_env = _env_nonempty(env, "MEMORY_ENABLED")
+
+    # file 的空串有语义（关闭文件日志），所以不能像其他字段那样直接 get(..., 默认值)：
+    # 0 / "" 都是合法取值，用 `or` 兜底会把它们悄悄换成默认值。
+    log_file = _env_nonempty(env, "LOG_FILE")
+    if log_file is None:
+        log_file_y = logging_y.get("file", "logs/app.log")
+        log_file = log_file_y if isinstance(log_file_y, str) else "logs/app.log"
+    log_max_bytes_y = logging_y.get("max_bytes")
+    log_backups_y = logging_y.get("backups")
+    log_console_env = _env_nonempty(env, "LOG_CONSOLE")
 
     settings = Settings(
         ocp=OcpConfig(
@@ -561,7 +618,25 @@ def load_settings(
                 _env_nonempty(env, "RERANK_MAX_PASSAGE_CHARS") or rerank_y.get("max_passage_chars", 500)
             ),
         ),
+        logging=LoggingConfig(
+            level=_env_nonempty(env, "LOG_LEVEL") or logging_y.get("level", "INFO"),
+            file=log_file,
+            max_bytes=int(
+                _env_nonempty(env, "LOG_MAX_BYTES")
+                or (5_000_000 if log_max_bytes_y is None else log_max_bytes_y)
+            ),
+            backups=int(
+                _env_nonempty(env, "LOG_BACKUPS") or (5 if log_backups_y is None else log_backups_y)
+            ),
+            console=_as_bool(
+                log_console_env if log_console_env is not None else logging_y.get("console"),
+                True,
+            ),
+            third_party_level=_env_nonempty(env, "LOG_THIRD_PARTY_LEVEL")
+            or logging_y.get("third_party_level", "WARNING"),
+        ),
     )
     _validate_agent(settings.agent)
     _validate_retrieval(settings)
+    _validate_logging(settings.logging)
     return settings

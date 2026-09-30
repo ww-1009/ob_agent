@@ -56,6 +56,7 @@ ob_agent/
 │   ├── app/
 │   │   ├── main.py           # create_app assembly (Config/LLM/Tools/Routes)
 │   │   ├── config.py         # Config loading (YAML + .env + Env variables)
+│   │   ├── logging_setup.py  # Logging: size-rotated file + console, uvicorn loggers (M9)
 │   │   ├── sse.py            # SSE frame serialization
 │   │   ├── agent/            # Agent orchestration
 │   │   │   ├── runner.py     # create_agent event stream → User event stream (Context compression/Timeout/Confirmation)
@@ -89,6 +90,7 @@ ob_agent/
 │   ├── config.yaml           # Actual config (Gitignored, not tracked)
 │   ├── .env.example          # Example env vars (Tracked in Git)
 │   └── .env                  # Actual env vars (Gitignored, not tracked)
+│   ├── logs/                 # app.log + rotations (Gitignored; created on first run)
 │   ├── scripts/              # unpack_doc.py: unzip the doc corpus in place (fixes filename encoding)
 │   ├── eval/                 # Retrieval eval set + run_eval.py (CI quality gate)
 │   ├── doc/                  # ob_wiki.zip (tracked) + ob_wiki/ (docs unzipped in place, gitignored)
@@ -234,8 +236,12 @@ cp backend/.env.example backend/.env
 | `memory`  | `open_timeout_seconds` / `open_attempts`                 | Startup connect budget; worst-case startup block ≈ `open_attempts × open_timeout_seconds` + backoff |
 | `auth`    | `enabled`                                                | Require `Authorization: Bearer <token>` on every `/api/*` route except `/api/health` |
 | `auth`    | `token`                                                  | The shared token; `enabled: true` with an empty token fails fast at startup |
+| `logging` | `level` / `third_party_level`                            | Root log level and the cap for noisy third-party loggers (`pymilvus` / `milvus_lite` / `grpc` / `httpx` / `httpcore` / `urllib3` / `jieba` / `faiss`). An unknown level name fails fast at startup (a typo would otherwise silently keep the old level) |
+| `logging` | `file`                                                   | Log file, resolved relative to `backend/` (default `logs/app.log`); `""` keeps console output only. Rotated by size |
+| `logging` | `max_bytes` / `backups`                                  | Rotation threshold (default `5000000`) and how many `app.log.N` history files to keep (default `5`); `0` disables rotation / keeps no history |
+| `logging` | `console`                                                | Also write to stderr (default `true`). Under systemd stderr still reaches journald |
 
-Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`, `AUTH_ENABLED`, `AUTH_TOKEN`, `CONFIRM_DB_OPS`, `CONFIRM_TIMEOUT_SECONDS`, `RECURSION_LIMIT`).
+Environment variables with the same names use uppercase format (e.g., `OCP_PROVIDER`, `LLM_BASE_URL`, `SEND_ROW_DATA`, `MEMORY_ENABLED`, `MEMORY_DSN`, `MEMORY_HOST`, `MEMORY_PASSWORD`, `AUTH_ENABLED`, `AUTH_TOKEN`, `CONFIRM_DB_OPS`, `CONFIRM_TIMEOUT_SECONDS`, `RECURSION_LIMIT`, `LOG_LEVEL`, `LOG_FILE`, `LOG_MAX_BYTES`, `LOG_BACKUPS`, `LOG_CONSOLE`, `LOG_THIRD_PARTY_LEVEL`).
 
 ### Configuration Priority
 
@@ -317,11 +323,29 @@ Minimal single-token scheme: set `auth.enabled: true` plus `auth.token` (or `AUT
 
 ### Failure surfacing
 
-An unexpected agent failure is **not** streamed verbatim: the client gets a generic message plus a short `error_id` (`{"type":"error","error_id":"ab12cd34","message":"agent 执行出错…（error_id=ab12cd34）"}`) while the full traceback stays in the server log — connection strings and hosts must not leak to the browser. Tool/database errors are the deliberate exception: they still flow to the LLM and into the trace and audit, because a DBA needs to see *why* a query failed.
+An unexpected agent failure is **not** streamed verbatim: the client gets a generic message plus a short `error_id` (`{"type":"error","error_id":"ab12cd34","message":"agent 执行出错…（error_id=ab12cd34）"}`) while the full traceback stays in the server log (since M9 that is `backend/logs/app.log` by default — see [Logging](#logging)) — connection strings and hosts must not leak to the browser. Tool/database errors are the deliberate exception: they still flow to the LLM and into the trace and audit, because a DBA needs to see *why* a query failed.
 
 Two concurrent requests on the same `thread_id` are rejected with `409` rather than being allowed to write divergent checkpoints, so a second browser tab gets a clear "this conversation is busy" message instead of silently corrupting the context.
 
 `GET /api/health` reports `auth_enabled` always, and adds `memory_error` **only** when memory/audit degraded, so you can tell why the history endpoints are returning `503`.
+
+### Logging
+
+The backend persists its own logs (M9) instead of relying on the terminal or `logging.lastResort`:
+
+- **Where**: `backend/logs/app.log` by default, resolved relative to the `backend/` directory (`LOG_FILE` / `logging.file` can point elsewhere). `logging.file: ""` disables the file and keeps console output only.
+- **Rotation**: the file is size-rotated — it grows to about `max_bytes` (default 5 MB) and then becomes `app.log.1`, keeping `backups` (default 5) history files, so disk usage is bounded at roughly `max_bytes × (backups + 1)`.
+- **What is captured**: application loggers (`app.*`), `uvicorn.error` and `uvicorn.access` (the access log is attached explicitly because uvicorn does not propagate it to the root logger), including full tracebacks from `logger.exception`. Noisy third-party loggers (`pymilvus` / `milvus_lite` / `grpc` / `httpx` / `httpcore` / `urllib3` / `jieba` / `faiss`) are capped at `third_party_level` (default `WARNING`) by a handler-level filter, because `jieba` re-enables its own `DEBUG` logger at import time.
+- **uvicorn's own level is left alone**: `uvicorn.error` / `uvicorn.access` keep whatever `--log-level` sets (default `INFO`); this module only decides *where* their records go. Use `--log-level` to make uvicorn itself more verbose.
+- **Console is kept** (`console: true`): under systemd stderr still reaches journald, so `journalctl -u ob-agent-backend -f` and `tail -f backend/logs/app.log` both work.
+- **Levels**: `INFO` by default (i.e. the startup/retrieval lines are now durable); an unknown level name fails fast at startup rather than silently keeping the old one. `LOG_*` environment variables are documented in the table above.
+- **Not written during tests**: pytest runs skip the file handler so the suite never appends to the repository's `logs/` (an explicit `LOG_FILE` or `force=True` overrides that).
+- **Single process only**: `RotatingFileHandler` cannot be shared between processes, which is fine because the backend must run with `--workers 1` (see [Deployment](#deployment-production)) — do not raise the worker count in the expectation that the log file stays consistent.
+
+```bash
+tail -f backend/logs/app.log                       # follow the backend log
+grep -n "ERROR\|Traceback" backend/logs/app.log    # errors and stack traces
+```
 
 ---
 
@@ -472,6 +496,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ob-agent-backend
 sudo systemctl status ob-agent-backend
 ```
+
+The service writes two log streams, and neither needs extra unit directives:
+
+- `backend/logs/app.log` (plus rotations) — the application log described in [Logging](#logging); make sure the `User=` account can create/write `backend/logs/`, or point `logging.file` somewhere writable.
+- stderr/stdout → journald (systemd's default, which is why the unit has no `StandardOutput=`/`StandardError=`), i.e. `journalctl -u ob-agent-backend -f` shows the same lines with `logging.console: true`.
+
+If the unit runs with a read-only or ephemeral `WorkingDirectory` (containers, hardened systemd), log to a mounted path via `Environment=LOG_FILE=/var/log/ob-agent/app.log`.
 
 ### 3) Post-Deployment Verification
 

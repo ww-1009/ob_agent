@@ -18,6 +18,9 @@ backend/data/real_*.json
 pytest-cache-files-*/
 retrieval-eval.json
 
+# 应用日志（logging.file 默认写这里，含轮转出的 app.log.N）
+/backend/logs/
+
 # 参考工程（不并入本仓库；仅作 OCP 接口借鉴）
 llm_db/
 

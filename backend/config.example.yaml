@@ -102,3 +102,15 @@ rerank:
   top_n: 30                    # 送入 rerank 的候选数
   timeout_seconds: 3.0         # 超时即保留融合原序（不报错）
   max_passage_chars: 500       # 单条 passage 截断上限
+logging:
+  # 应用日志（标准库 logging）：默认落盘 backend/logs/app.log 并按大小轮转。
+  # file 相对路径按 backend/ 解析，不随启动目录漂移；file: "" = 关闭文件日志、只打控制台。
+  file: "logs/app.log"
+  level: "INFO"                # 级别名必须是标准库认识的（NOTSET/DEBUG/INFO/WARNING/ERROR/CRITICAL）
+  max_bytes: 5000000           # 单文件上限（字节）；<=0 不轮转（文件会一直涨，慎用）
+  backups: 5                   # 保留 app.log.1 … app.log.N
+  console: true                # 应用日志是否同时打 stderr（systemd 下仍进 journalctl）
+  third_party_level: "WARNING" # pymilvus/grpc/httpx/jieba 等的级别，压住库噪声
+  # 注意：RotatingFileHandler 不是多进程安全的；服务端已强制 --workers 1（见 README）。
+  # 需要多 worker 时应改走 journald，或给不同 worker 配不同的 file。
+  # 日志可能含内网主机名/租户名/错误正文，建议目录权限收紧，且不要放在 Web 根目录下。

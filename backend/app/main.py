@@ -18,6 +18,7 @@ from app.api.confirm import make_confirm_router
 from app.api.deps import require_token
 from app.api.threads import make_threads_router
 from app.config import Settings, load_settings
+from app.logging_setup import configure_logging
 from app.memory import MemoryRuntime, open_memory
 from app.tools.ocp import get_ocp_client
 from app.tools.sql.registry import close_all_executors
@@ -78,6 +79,9 @@ def create_app(
     memory: MemoryRuntime | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else load_settings()
+    # 尽早初始化日志（含 uvicorn 访问日志的文件 handler）：后面所有 import 期/启动期
+    # 的 warning 才留得住；pytest 下该函数自动跳过，不会往仓库写日志（见 logging_setup）。
+    configure_logging(settings.logging)
     # fail closed：开了访问控制却没配令牌，宁可起不来也不要"以为开了其实没开"
     if settings.auth.enabled and not settings.auth.token.strip():
         raise RuntimeError(

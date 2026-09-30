@@ -57,6 +57,7 @@ ob_agent/
 │   ├── app/
 │   │   ├── main.py           # create_app 装配（配置/LLM/工具/路由）
 │   │   ├── config.py         # 配置加载（YAML + .env + 环境变量）
+│   │   ├── logging_setup.py  # 日志：按大小轮转的文件 + 控制台，接管 uvicorn logger（M9）
 │   │   ├── sse.py            # SSE 帧序列化
 │   │   ├── agent/            # Agent 编排
 │   │   │   ├── runner.py     # create_agent 事件流 → 用户事件流（上下文压缩/超时/确认）
@@ -90,6 +91,7 @@ ob_agent/
 │   ├── config.yaml           # 实际配置（已 gitignore，不再被 git 跟踪）
 │   ├── .env.example          # 示例环境变量（入库）
 │   └── .env                  # 实际环境变量（已 gitignore，不再被 git 跟踪）
+│   ├── logs/                 # app.log + 轮转历史（已 gitignore；首次运行自动创建）
 │   ├── scripts/              # unpack_doc.py：就地解压文档语料（修复文件名编码）
 │   ├── eval/                 # 检索评测集 + run_eval.py（CI 质量门禁）
 │   ├── doc/                  # ob_wiki.zip（入库）+ ob_wiki/（就地解压的官方文档，gitignore）
@@ -253,8 +255,12 @@ cp backend/.env.example backend/.env
 | `memory`  | `open_timeout_seconds` / `open_attempts`                 | 启动连接预算；最坏启动阻塞 ≈ `open_attempts × open_timeout_seconds` + 退避 |
 | `auth`    | `enabled`                                                | 除 `/api/health` 外所有 `/api/*` 要求 `Authorization: Bearer <token>` |
 | `auth`    | `token`                                                  | 共享令牌；`enabled: true` 而令牌为空会导致启动失败（fail closed）    |
+| `logging` | `level` / `third_party_level`                            | 根日志级别，以及吵闹第三方 logger（`pymilvus` / `milvus_lite` / `grpc` / `httpx` / `httpcore` / `urllib3` / `jieba` / `faiss`）的上限。级别名写错（如 `verbose`）启动即失败，避免“写错静默沿用旧级别” |
+| `logging` | `file`                                                   | 日志文件，相对 `backend/` 解析（默认 `logs/app.log`）；`""` 只保留控制台输出。按大小轮转 |
+| `logging` | `max_bytes` / `backups`                                  | 轮转阈值（默认 `5000000`）与保留的历史文件数（默认 `5`，即 `app.log.1`…）；`0` 表示不轮转 / 不留历史 |
+| `logging` | `console`                                                | 是否同时写 stderr（默认 `true`）。systemd 下 stderr 仍进 journald |
 
-环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`、`MEMORY_ENABLED`、`MEMORY_DSN`、`MEMORY_HOST`、`MEMORY_PASSWORD`、`AUTH_ENABLED`、`AUTH_TOKEN`）。
+环境变量同名键为大写形式（如 `OCP_PROVIDER`、`LLM_BASE_URL`、`SEND_ROW_DATA`、`MEMORY_ENABLED`、`MEMORY_DSN`、`MEMORY_HOST`、`MEMORY_PASSWORD`、`AUTH_ENABLED`、`AUTH_TOKEN`、`LOG_LEVEL`、`LOG_FILE`、`LOG_MAX_BYTES`、`LOG_BACKUPS`、`LOG_CONSOLE`、`LOG_THIRD_PARTY_LEVEL`）。
 
 ### 配置优先级
 
@@ -336,11 +342,29 @@ curl -s "http://127.0.0.1:8000/api/audit?thread_id=demo-1&tool=execute_sql"
 
 ### 失败如何呈现
 
-agent 的**意外异常不会原文下发**：客户端只拿到一句通用文案加一个短 `error_id`（`{"type":"error","error_id":"ab12cd34","message":"agent 执行出错…（error_id=ab12cd34）"}`），完整堆栈只留在服务端日志——连接串、主机名不应泄漏给浏览器。工具/数据库错误是有意的例外：它们仍会送给 LLM 并落入轨迹与审计，因为 DBA 需要看到查询**为什么**失败。
+agent 的**意外异常不会原文下发**：客户端只拿到一句通用文案加一个短 `error_id`（`{"type":"error","error_id":"ab12cd34","message":"agent 执行出错…（error_id=ab12cd34）"}`），完整堆栈只留在服务端日志（M9 起默认就是 `backend/logs/app.log`，见 [日志持久化](#日志持久化)）——连接串、主机名不应泄漏给浏览器。工具/数据库错误是有意的例外：它们仍会送给 LLM 并落入轨迹与审计，因为 DBA 需要看到查询**为什么**失败。
 
 同一 `thread_id` 的并发请求会返回 `409` 而不是被允许写出分叉的检查点，因此第二个浏览器标签会看到明确的「该会话正在处理中」，而不是静默写坏上下文。
 
 `GET /api/health` 固定返回 `auth_enabled`，并**仅在**记忆/审计降级时附带 `memory_error`，便于判断历史接口为何返回 `503`。
+
+### 日志持久化
+
+后端会把自己的日志落盘（M9），不再依赖终端或 `logging.lastResort`：
+
+- **位置**：默认 `backend/logs/app.log`，相对 `backend/` 解析（`LOG_FILE` / `logging.file` 可改路径）；`logging.file: ""` 表示只保留控制台输出。
+- **轮转**：按大小轮转——写到约 `max_bytes`（默认 5 MB）后转成 `app.log.1`，总共保留 `backups`（默认 5）个历史文件，磁盘占用上限约 `max_bytes × (backups + 1)`。
+- **写入内容**：应用日志（`app.*`）、`uvicorn.error` 与 `uvicorn.access`（访问日志必须显式挂 handler，因为 uvicorn 不向 root 传播），以及 `logger.exception` 的完整堆栈。吵闹第三方 logger（`pymilvus` / `milvus_lite` / `grpc` / `httpx` / `httpcore` / `urllib3` / `jieba` / `faiss`）由 handler 级 filter 压到 `third_party_level`（默认 `WARNING`）——因为 `jieba` 会在 import 时把自己的 logger 重新开成 `DEBUG`，只 setLevel 压不住。
+- **uvicorn 自己的级别不归它管**：`uvicorn.error` / `uvicorn.access` 的级别仍由 `--log-level`（默认 `INFO`）决定，这里只决定这些记录**去哪儿**；要让 uvicorn 本身更啰嗦请调 `--log-level`，不要指望 `logging.level`。
+- **保留控制台**（`console: true`）：systemd 下 stderr 仍进 journald，所以 `journalctl -u ob-agent-backend -f` 与 `tail -f backend/logs/app.log` 都能用。
+- **级别**：默认 `INFO`（启动、检索预热这些行现在真的留下来了）；级别名写错会在启动时直接失败，而不是静默沿用旧级别。`LOG_*` 环境变量见上表。
+- **跑测试不写文件**：pytest 下默认跳过文件 handler，测试套件不会往仓库的 `logs/` 里追加（显式设 `LOG_FILE` 或 `force=True` 才写）。
+- **仅单进程安全**：`RotatingFileHandler` 不支持多进程共享，而后端本就要求 `--workers 1`（见[部署](#部署生产环境)），不要在提高 worker 数的同时期待日志文件保持完整。
+
+```bash
+tail -f backend/logs/app.log                       # 跟踪后端日志
+grep -n "ERROR\|Traceback" backend/logs/app.log    # 只看错误与堆栈
+```
 
 ---
 
@@ -511,6 +535,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ob-agent-backend
 sudo systemctl status ob-agent-backend
 ```
+
+该服务有两路日志，都不需要额外的 unit 指令：
+
+- `backend/logs/app.log`（含轮转历史）——[日志持久化](#日志持久化)一节描述的应用日志；请确保 `User=` 指定的账号能创建/写入 `backend/logs/`，或用 `logging.file` 指到可写路径。
+- stderr/stdout → journald（systemd 默认行为，因此 unit 里没有 `StandardOutput=`/`StandardError=`）：`journalctl -u ob-agent-backend -f` 能看到同样的行（源于 `logging.console: true`）。
+
+若 `WorkingDirectory` 只读或为临时目录（容器、加固过的 systemd），请改用挂载路径：`Environment=LOG_FILE=/var/log/ob-agent/app.log`。
 
 ### 3）部署后验证
 

@@ -40,6 +40,7 @@ from pymilvus import (
 )
 
 from app.config import EmbeddingConfig, RetrievalConfig, Settings, load_settings
+from app.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -799,6 +800,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_mode = "incremental"
 
     settings = load_settings()
+    # 建库是长时任务（全量向量实测 962s、稀疏 ~75s），它自己的 info/warning 必须落盘；
+    # 纯库模块（doc_index/milvus_build）不各自挂钩，由入口统一初始化。
+    configure_logging(settings.logging)
     if build_mode:
         return _run_build(settings, mode=build_mode, args=args, json_out=args.json)
 
