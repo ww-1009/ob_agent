@@ -226,7 +226,7 @@
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `pk` | `INT64`（主键） | `xxh64(f"{path}#{section}")`——**用身份而非内容做键**，避免"两篇文档有完全相同的段落"被合并成一行 |
+| `pk` | `INT64`（主键） | `xxh64(f"{path}#{section}#{seq}")`——**用身份而非内容做键**，避免"两篇文档有完全相同的段落"被合并成一行。`seq` 是同一 `(path, section)` 内的第几块（0 起）：**必须带**，因为 `_split_chunks` 会把超 1800 字的同一小节切成多块（现有库里实测 1630 组 `(path, section)` 重复、单组最多 29 块），只按 `path#section` 做键会在 upsert 时互相覆盖 |
 | `content_hash` | `VARCHAR(32)` | 嵌入文本的哈希；用于**判断是否需要重新 embedding**（不是主键） |
 | `text` | `VARCHAR(8000)`, `enable_analyzer=True`, `analyzer_params={"type":"jieba"}` | 被 BM25 分析的文本：`{标题(前缀重复)} > {小节} | {正文}`；同时作为 snippet 来源 |
 | `sparse` | `SPARSE_FLOAT_VECTOR` | **由 BM25 Function 自动生成**，不手工写入 |
@@ -355,7 +355,7 @@ python -m app.agent.milvus_index --verify            # 两路可查 + meta 一�
 流程：
 
 1. 扫描 `backend/doc/ob_wiki` → 解析 frontmatter → `_split_chunks`（**沿用现有实现**，39 行不动）。
-2. 生成 `pk = xxh64(path#section)` 与 `content_hash`（基于最终 `text`）。
+2. 生成 `pk = xxh64(path#section#seq)` 与 `content_hash`（基于最终 `text`）；`seq` 为同一小节内的块序号（见 §5.1）。
 3. **增量判定**：从 `ob_chunks` 查回现有 `pk → content_hash`，只对「新增」或「哈希变化」的块调用 embedding；未变的块**跳过费用**。
 4. 组装行：`text` = `{标题前缀重复} > {小节} | {正文}`（§8.2 的权重复刻），`text` 与 `vector` 一起 `upsert`。
 5. **剪枝**：删除本次不再存在的 `pk`（文件被删/小节改名）：`delete(filter="pk in [...]")` 分批执行。

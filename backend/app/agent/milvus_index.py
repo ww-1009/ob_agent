@@ -14,7 +14,9 @@
 
 字段口径见 ``backend/eval/docs/milvus-only-retrieval-design.md`` §5.1：
 
-- ``pk``：``xxh64(f"{path}#{section}")``，用**身份**做键而不是内容哈希（两篇文档可以有完全相同的段落）。
+- ``pk``：``xxh64(f"{path}#{section}#{seq}")``，用**身份**做键而不是内容哈希（两篇文档可以有完全相同的段落）。
+  带 ``seq`` 是因为 ``_split_chunks`` 会把超长小节切成多块：现有库里有 1630 组 ``(path, section)`` 重复，
+  单组最多 29 块，只按 ``path#section`` 做键会在 upsert 时互相覆盖。
 - ``text``：被 BM25 分析的文本（标题前缀重复 + 小节 + 正文），也是 snippet 来源。
 - ``vector``：``FLOAT_VECTOR(dims)``。**不可空**——省略字段或显式 None 都会被拒（probe7 第 1 节），
   导航行因此写零向量，稠密一路恒 ``filter kind == "doc"``（零向量在 COSINE 下 distance=0，不会上浮）。
