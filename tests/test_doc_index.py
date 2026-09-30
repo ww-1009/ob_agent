@@ -1,19 +1,31 @@
-"""ob_wiki 全文检索层（app.agent.doc_index）与 search_docs / read_doc 工具的契约测试。
+"""ob_wiki 文档层（app.agent.doc_index）与 search_docs / read_doc 工具的契约测试。
 
-用 tmp_path 里的**合成小语料**跑，不依赖 backend/doc 下 5000+ 篇真文档（那套只用于实测）：
-这里固化的是检索语义（中文双字词命中、模式/版本消歧、导航页/导航小节降权、疑问词过滤、
-路径越界拒绝），这些点在真语料上实测过的行为见提交说明。
+M7 起 doc_index 不再自带索引库：检索交给 ``app.agent.retrieval``（Milvus），本模块只留
+「与引擎无关」的部分——路径收敛、frontmatter/keywords 解析、切片 ``_split_chunks``、精读
+``read``（直接读文件），以及给工具层的门面。这里用 tmp_path 里的合成小语料固化这些语义；
+**检索语义**（命中/降权/模式与版本消歧）在 ``tests/test_retrieval.py`` 里对真 Milvus 固化。
 """
 import json
-import time
+from pathlib import Path
 
 import pytest
 
+from app.agent import doc_index as di
 from app.agent.doc_index import (
+    DEFAULT_LIMIT,
+    DEFAULT_READ_CHARS,
+    MAX_CHUNK_CHARS,
+    MAX_LIMIT,
+    MAX_READ_CHARS,
     DocIndex,
-    DocIndexMissing,
+    DocIndexError,
     DocPathError,
-    SCHEMA_VERSION,
+    _clean_keywords,
+    _clean_title,
+    _detect_mode,
+    _detect_version,
+    _parse_frontmatter,
+    _split_chunks,
 )
 
 MYSQL_DOC = """\
@@ -93,311 +105,98 @@ keywords: 事务,隔离级别,锁等待,版本
 - [版本发布记录](./version.md)
 """
 
-# 根 README.md 与 index.md 同属导航类（只指路不讲答案），但它是说明文、不是链接清单
-README_PAGE = """\
----
-title: OceanBase 本地知识库检索指南
-description: 说明文档库的组织方式与检索方式
-keywords: 索引体系,检索指南
----
-# OceanBase 本地知识库检索指南
-
-## 索引体系
-
-知识库由分类索引与正文组成，索引页只指路，答案以正文为准。
-"""
-
-# 清单类提问的目标文档：讲错误码本身
-CODE_DOC = """\
----
-title: 错误码总览
-description: OceanBase 错误码按编号范围分类
-keywords: 错误码,ORA
----
-## 错误码分类
-
-OceanBase 的错误码按编号范围分段：ORA-00000 ~ ORA-04999 是常见错误，错误码文档里能查到完整清单。
-"""
-
-# 干扰文档：堆满疑问词但不讲答案（真语料里的 FAQ 文档就是这个形态）
-FAQ_DOC = """\
----
-title: 产品 FAQ
-description: 常见问题罗列
-keywords: FAQ
----
-## 常见问题
-
-有哪些功能？一共支持多少种场景？包含了哪些限制？这些问题分别有哪些注意事项？
-"""
-
 
 @pytest.fixture
 def wiki(tmp_path):
-    """合成文档库：导航页（index.md + README.md）+ MySQL/Oracle 同名文档 + 锁等待 + 版本小节
-    + 清单类提问（错误码，含 FAQ 干扰）。"""
+    """合成文档库：导航页 + MySQL/Oracle 同名文档 + 锁等待 + 版本小节。"""
     root = tmp_path / "doc"
     (root / "ob_wiki" / "事务隔离级别").mkdir(parents=True)
     (root / "ob_wiki" / "问题排查").mkdir(parents=True)
     (root / "ob_wiki" / "版本发布记录").mkdir(parents=True)
-    (root / "ob_wiki" / "错误码").mkdir(parents=True)
-    (root / "ob_wiki" / "常见问题").mkdir(parents=True)
     (root / "ob_wiki" / "index.md").write_text(INDEX_PAGE, encoding="utf-8")
-    (root / "ob_wiki" / "README.md").write_text(README_PAGE, encoding="utf-8")
     (root / "ob_wiki" / "事务隔离级别" / "MySQL 模式的事务隔离级别.md").write_text(MYSQL_DOC, encoding="utf-8")
     (root / "ob_wiki" / "事务隔离级别" / "Oracle 模式的事务隔离级别.md").write_text(ORACLE_DOC, encoding="utf-8")
     (root / "ob_wiki" / "问题排查" / "锁等待排查.md").write_text(LOCK_DOC, encoding="utf-8")
     (root / "ob_wiki" / "版本发布记录" / "OceanBase 数据库企业版.md").write_text(VERSION_DOC, encoding="utf-8")
-    (root / "ob_wiki" / "错误码" / "错误码总览.md").write_text(CODE_DOC, encoding="utf-8")
-    (root / "ob_wiki" / "常见问题" / "产品 FAQ.md").write_text(FAQ_DOC, encoding="utf-8")
     return root
 
 
 @pytest.fixture
 def idx(wiki):
-    # 索引库落在 doc_root 下（默认文件名 ob_wiki.index.db），与真实现一致。
-    # TTL=0：测试里改完语料就要立刻看到重建，不吃指纹缓存。
-    return DocIndex(wiki, fingerprint_ttl_seconds=0)
+    return DocIndex(wiki)
 
 
-@pytest.fixture
-def idx_cached(wiki):
-    """生产默认（带指纹缓存）的实例，专供缓存行为用例。"""
-    return DocIndex(wiki, fingerprint_ttl_seconds=60.0)
+def _long_h1_only_doc(tmp_path: Path, *, paragraphs: int = 200) -> tuple[DocIndex, Path]:
+    """只有 H1、没有 H2/H3 的长文档（真语料里有 6 篇，最大 ``obshell/错误码.md`` 40363 字）。"""
+    root = tmp_path / "doc" / "ob_wiki"
+    root.mkdir(parents=True)
+    body = "# 巨表\n\n" + "\n\n".join(f"第 {i} 段：{'长' * 80}" for i in range(paragraphs))
+    path = root / "巨表.md"
+    path.write_text(body, encoding="utf-8")
+    return DocIndex(root.parent), path
 
 
-# ---- 建库 ----
+# ---- 解析与切片（与建索引共用，不能再依赖索引库）----
 
-def test_ensure_builds_index_and_stats(idx):
-    idx.ensure()
-    stats = idx.stats()
-    assert stats["docs"] == 8
-    assert stats["chunks"] >= 9
-    assert stats["schema_version"] == SCHEMA_VERSION
-    assert idx.db_path.is_file()
+def test_parse_frontmatter_splits_meta_and_body():
+    meta, body = _parse_frontmatter(MYSQL_DOC)
+    assert meta["title"] == "MySQL 模式的事务隔离级别"
+    assert meta["keywords"].startswith("事务,隔离级别")
+    assert body.lstrip().startswith("## 隔离级别设置方法")
 
 
-def test_ensure_is_idempotent_and_rebuilds_on_corpus_change(idx, wiki):
-    idx.ensure()
-    before = idx.db_path.stat().st_mtime_ns
-    idx.ensure()  # 语料未变 → 不重建
-    assert idx.db_path.stat().st_mtime_ns == before
-    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
-        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
-        encoding="utf-8",
-    )
-    idx.ensure()  # 文件数变化 → 指纹变化 → 重建
-    assert idx.stats()["docs"] == 9
-    assert idx.search("合并卡住")[0]["path"].endswith("合并异常问题排查.md")
+def test_parse_frontmatter_without_block_returns_text():
+    meta, body = _parse_frontmatter("## 只有正文\n\n没有 frontmatter。\n")
+    assert meta == {}
+    assert body.startswith("## 只有正文")
 
 
-def test_missing_wiki_dir_raises(tmp_path):
-    with pytest.raises(DocIndexMissing):
-        DocIndex(tmp_path / "nowhere").ensure()
+def test_clean_title_and_keywords():
+    assert _clean_title("分区表设计-OceanBase") == "分区表设计"
+    assert _clean_title("分区表设计") == "分区表设计"
+    # 站点标签属于导入残留，不进索引文本
+    assert _clean_keywords("事务, OB Cloud 云数据库，隔离级别") == "事务 隔离级别"
 
 
-# ---- 指纹缓存（search 每次都全库 stat，真语料实测约 50ms）----
-
-def test_fingerprint_cache_avoids_rescan(idx_cached, monkeypatch):
-    calls = {"n": 0}
-    real = idx_cached._scan_fingerprint
-
-    def counting():
-        calls["n"] += 1
-        return real()
-
-    monkeypatch.setattr(idx_cached, "_scan_fingerprint", counting)
-    first = idx_cached._fingerprint()
-    assert idx_cached._fingerprint() == first
-    assert calls["n"] == 1, "TTL 内不应重复全库 stat"
-    idx_cached.invalidate_fingerprint()
-    assert idx_cached._fingerprint() == first
-    assert calls["n"] == 2, "显式失效后必须重扫"
+def test_detect_mode_and_version():
+    assert _detect_mode("ob_wiki/事务隔离级别/（Oracle 模式）事务隔离级别.md") == "Oracle"
+    assert _detect_mode("ob_wiki/事务隔离级别/MySQL 租户.md") == "MySQL"
+    assert _detect_mode("ob_wiki/普通文档.md") == ""
+    assert _detect_version("V4.2.5", "x.md") == "4.2.5"
+    assert _detect_version("没有版本", "v3.1.0 更新记录.md") == "3.1.0"
 
 
-def test_fingerprint_cache_expires_after_ttl(wiki):
-    idx = DocIndex(wiki, fingerprint_ttl_seconds=0.05)
-    before = idx._fingerprint()
-    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
-        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
-        encoding="utf-8",
-    )
-    assert idx._fingerprint() == before, "TTL 窗口内沿用缓存值"
-    time.sleep(0.06)
-    assert idx._fingerprint() != before, "TTL 过期后必须重扫并看到新文件"
+def test_split_chunks_keeps_section_trail():
+    chunks = _split_chunks("## 甲\n\n甲正文。\n\n### 乙\n\n乙正文。\n")
+    assert [name for name, _ in chunks] == ["甲", "甲 > 乙"]
 
 
-def test_new_subdir_is_noticed_within_ttl_via_dir_mtime(idx_cached, wiki):
-    """新增子目录会改 wiki 根目录 mtime —— 即便 TTL 未到也必须立刻重建。"""
-    idx_cached.ensure()
-    (wiki / "ob_wiki" / "新增目录").mkdir()
-    (wiki / "ob_wiki" / "新增目录" / "新文档.md").write_text(
-        "---\ntitle: 新文档\n---\n## 小节\n\n新增语料。\n", encoding="utf-8"
-    )
-    idx_cached.ensure()
-    assert idx_cached.stats()["docs"] == 9
+def test_split_chunks_hard_splits_long_section():
+    body = "## 大节\n\n" + "\n\n".join(f"第 {i} 段：{'长' * 80}" for i in range(120))
+    chunks = _split_chunks(body)
+    assert len(chunks) > 1
+    assert all(len(text) <= MAX_CHUNK_CHARS for _, text in chunks)
+    assert all(name == "大节" for name, _ in chunks)
 
 
-def test_nested_file_change_waits_for_ttl(idx_cached, wiki):
-    """已知取舍：往子目录里加文件不改根目录 mtime，TTL 内会沿用旧索引（最迟 TTL 后生效）。"""
-    idx_cached.ensure()
-    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
-        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
-        encoding="utf-8",
-    )
-    idx_cached.ensure()
-    assert idx_cached.stats()["docs"] == 8, "TTL 内不重建"
-    idx_cached.invalidate_fingerprint()
-    assert idx_cached.stats()["docs"] == 9, "显式失效后立刻重建"
+def test_split_chunks_splits_h1_only_long_doc(tmp_path):
+    """M7 根治：没有 H2/H3 的兜底路径也必须切，否则整篇只能被 max_text_bytes 截掉后半篇。"""
+    _, path = _long_h1_only_doc(tmp_path)
+    meta, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    chunks = _split_chunks(body)
+    assert len(chunks) > 1
+    assert all(name == "巨表" for name, _ in chunks)
+    assert all(len(text) <= MAX_CHUNK_CHARS for _, text in chunks)
+    # 内容不能再被截断：拼回去要覆盖全文
+    assert sum(len(text) for _, text in chunks) > 8000
 
 
-def test_ensure_force_bypasses_fingerprint_cache(idx_cached, wiki):
-    idx_cached.ensure()
-    before = idx_cached.db_path.stat().st_mtime_ns
-    (wiki / "ob_wiki" / "问题排查" / "合并异常问题排查.md").write_text(
-        "---\ntitle: 合并异常问题排查\n---\n## 典型案例\n\n合并卡住时先看 major freeze 进度。\n",
-        encoding="utf-8",
-    )
-    idx_cached.ensure()  # 子目录改动 + TTL 未到 → 不重建
-    assert idx_cached.db_path.stat().st_mtime_ns == before
-    idx_cached.ensure(force=True)  # force 必须绕过缓存
-    assert idx_cached.db_path.stat().st_mtime_ns != before
-    assert idx_cached.stats()["docs"] == 9
+def test_split_chunks_without_any_heading_uses_body_label():
+    chunks = _split_chunks("没有标题的一段正文。\n\n还有第二段。\n")
+    assert [name for name, _ in chunks] == ["正文"]
 
 
-def test_fingerprint_ttl_comes_from_settings(tmp_path, monkeypatch):
-    """TTL 取自 retrieval.fingerprint_ttl_seconds，configure() 与 get_index() 都要接上。"""
-    from app.agent import doc_index as di
-
-    monkeypatch.setattr(di, "_default", None)
-    assert di.configure(tmp_path / "doc", fingerprint_ttl_seconds=0).fingerprint_ttl_seconds == 0.0
-
-    monkeypatch.setenv("RETRIEVAL_FINGERPRINT_TTL_SECONDS", "0.5")
-    assert di._configured_fingerprint_ttl() == 0.5
-    assert di.configure(tmp_path / "doc").fingerprint_ttl_seconds == 0.5
-    monkeypatch.setattr(di, "_default", None)
-    assert di.get_index().fingerprint_ttl_seconds == 0.5
-
-
-# ---- 检索语义 ----
-
-def test_two_char_chinese_query_hits(idx):
-    """「事务」这种双字查询必须命中——trigram 分词器会在这里返回 0 条。"""
-    hits = idx.search("事务")
-    assert hits
-    assert any("事务隔离级别" in h["path"] for h in hits)
-
-
-def test_mode_in_question_filters_same_named_docs(idx):
-    """MySQL/Oracle 有同名文档，提问写了模式就必须只给对应模式那篇。"""
-    mysql = idx.search("MySQL 模式的事务隔离级别")
-    assert mysql[0]["path"].endswith("MySQL 模式的事务隔离级别.md")
-    assert mysql[0]["mode"] == "MySQL"
-    assert all("Oracle 模式的" not in h["path"] for h in mysql)
-
-    oracle = idx.search("Oracle 模式的事务隔离级别")
-    assert oracle[0]["path"].endswith("Oracle 模式的事务隔离级别.md")
-    assert oracle[0]["mode"] == "Oracle"
-
-
-def test_mode_detection_is_case_insensitive(idx):
-    hits = idx.search("oracle 模式的事务隔离级别")
-    assert hits[0]["mode"] == "Oracle"
-
-
-def test_explicit_mode_argument_wins(idx):
-    hits = idx.search("事务隔离级别", mode="oracle")
-    assert hits
-    assert all(h["mode"] in ("Oracle", "") for h in hits)
-
-
-def test_navigation_files_are_downweighted_not_dropped(idx):
-    """index.md 与根 README.md 都归为 nav，默认重降权而不是硬排除。
-
-    不能硬排除：实测真语料里「OceanBase 数据库包含哪些分类」的最佳答案就是根 README.md；
-    也不能不降权：导航页又短又堆关键词，bm25 天然压过正文。
-    """
-    default = idx.search("事务")
-    assert default
-    assert all(h["kind"] == "doc" for h in default)
-
-    # 只有导航页能答的提问，默认也要拿得到（重降权 ≠ 排除）
-    nav_only = idx.search("知识库检索指南")
-    assert nav_only and nav_only[0]["kind"] == "nav"
-    assert nav_only[0]["path"].endswith("README.md")
-
-    # 同一篇 nav 小节：显式打开（include_index=True）时分数更高，默认即使能被召回也被扣分
-    low = {h["path"]: h["score"] for h in idx.search("事务与隔离级别索引", limit=10)}
-    high = {h["path"]: h["score"] for h in idx.search("事务与隔离级别索引", include_index=True, limit=10)}
-    nav_path = next(p for p, s in high.items() if p.endswith("index.md") and s)
-    assert nav_path in low  # 默认仍在候选里（重降权 ≠ 排除）
-    assert low[nav_path] < high[nav_path]
-    # 正文够用时导航页不得插进前列（导航页 bm25 天然更高，扣分不够就会挤掉正文）
-    assert all(h["kind"] == "doc" for h in idx.search("事务与隔离级别索引")[:3])
-
-
-def test_query_tokens_drop_question_words():
-    """清单类提问的字面（「哪些/有哪/一共」）会命中 FAQ 文档，必须在查询侧去掉；
-    同时不能把提问全滤空（退回未过滤结果）。"""
-    from app.agent.doc_index import _query_tokens
-
-    tokens = _query_tokens("错误码一共有哪些")
-    assert {"哪些", "有哪", "一共", "一", "共", "哪", "些"} & set(tokens) == set()
-    assert "错误" in tokens and "误码" in tokens
-    assert _query_tokens("哪些")  # 全被过滤时退回未过滤结果，不会变成空查询
-
-
-def test_list_question_prefers_answer_doc_over_faq_noise(idx):
-    """真语料实测缺陷：没过滤疑问词时「错误码一共有哪些」前三全是 FAQ 类文档。"""
-    hits = idx.search("错误码一共有哪些")
-    assert hits
-    assert hits[0]["title"] == "错误码总览"
-    assert all(h["title"] != "产品 FAQ" for h in hits)
-
-
-def test_version_section_gets_bonus_and_filter(idx):
-    hits = idx.search("V4.2.5 版本新增了什么")
-    assert hits[0]["path"].endswith("OceanBase 数据库企业版.md")
-    assert hits[0]["version"] == "4.2.5"
-    assert "V4.2.5" in hits[0]["section"]
-    assert idx.search("版本新增", version="4.2.5")[0]["version"] == "4.2.5"
-
-
-def test_result_shape(idx):
-    hit = idx.search("锁等待")[0]
-    assert set(hit) == {"path", "kind", "section", "title", "mode", "version", "score", "snippet"}
-    assert hit["path"].startswith("ob_wiki/")
-    assert hit["score"] > 0
-    assert len(hit["snippet"]) <= 240
-
-
-def test_snippet_is_body_text_not_ellipses(idx):
-    """命中词落在标题/小节名上时 FTS5 的 snippet() 对正文取不到片段、只剩省略号；
-    摘要必须自己在正文里取以命中词为中心的片段，否则模型拿到的是「……」。"""
-    hit = idx.search("锁等待")[0]
-    assert len(hit["snippet"]) > 40
-    assert hit["snippet"].strip("…") != ""
-    assert "lock wait" in hit["snippet"].lower() or "GV$OB_LOCKS" in hit["snippet"]
-
-
-def test_search_rejects_empty_query(idx):
-    from app.agent.doc_index import DocIndexError
-
-    with pytest.raises(DocIndexError):
-        idx.search("   ")
-
-
-def test_at_most_two_chunks_per_document(idx):
-    hits = idx.search("隔离级别", limit=10)
-    paths = [h["path"] for h in hits]
-    assert len(paths) == len(set(paths)) or paths.count(paths[0]) <= 2
-
-
-def test_limit_is_capped(idx):
-    assert len(idx.search("事务", limit=999)) <= 20
-
-
-# ---- 分节读取 ----
+# ---- 精读 read（M7 起直接读文件，不依赖任何索引库）----
 
 def test_read_returns_section_text_and_toc(idx):
     doc = idx.read("事务隔离级别/MySQL 模式的事务隔离级别.md", section="设置方法")
@@ -413,12 +212,36 @@ def test_read_whole_doc_when_no_section(idx):
     doc = idx.read("事务隔离级别/MySQL 模式的事务隔离级别.md")
     assert "SET TRANSACTION ISOLATION LEVEL" in doc["text"]
     assert "与原生 MySQL 保持一致" in doc["text"]
+    assert "隔离级别设置方法" not in doc["text"]
+    assert doc["total_chars"] == sum(len(t) for _, t in _split_chunks(_parse_frontmatter(MYSQL_DOC)[1]))
+
+
+def test_read_title_falls_back_to_filename(tmp_path):
+    root = tmp_path / "doc" / "ob_wiki"
+    root.mkdir(parents=True)
+    (root / "无标题-OceanBase.md").write_text("## 小节\n\n正文。\n", encoding="utf-8")
+    assert DocIndex(root.parent).read("无标题-OceanBase.md")["title"] == "无标题"
 
 
 def test_read_truncates(idx):
     doc = idx.read("事务隔离级别/MySQL 模式的事务隔离级别.md", max_chars=200)
     assert doc["truncated"] is True
     assert len(doc["text"]) <= 200
+
+
+def test_read_caps_max_chars(idx):
+    doc = idx.read("事务隔离级别/MySQL 模式的事务隔离级别.md", max_chars=10**9)
+    assert len(doc["text"]) <= MAX_READ_CHARS
+    assert DEFAULT_READ_CHARS < MAX_READ_CHARS
+
+
+def test_read_sees_all_chunks_of_h1_only_doc(tmp_path):
+    """兜底切块后 read 也要能读全：整篇 > 8000 字符且不再被当成"截断"。"""
+    index, _ = _long_h1_only_doc(tmp_path)
+    doc = index.read("巨表.md", max_chars=MAX_READ_CHARS)
+    assert doc["total_chars"] > 8000
+    assert doc["truncated"] is False
+    assert doc["sections"] and all(s["section"] == "巨表" for s in doc["sections"])
 
 
 def test_read_accepts_ob_wiki_and_doc_prefixes(idx):
@@ -457,16 +280,114 @@ def test_read_nonexistent_path(idx):
         idx.read("问题排查/根本没有这篇.md")
 
 
+# ---- 检索门面（引擎在 app.agent.retrieval，这里只验证参数转发与降级）----
+
+def _record(monkeypatch, index: DocIndex, *, entries=None) -> dict:
+    seen: dict = {}
+
+    def fake(query, engine, **kwargs):
+        seen.update(query=query, engine=engine, **kwargs)
+        return list(entries or [])
+
+    monkeypatch.setattr(index, "_search_milvus", fake)
+    return seen
+
+
+def test_search_forwards_default_engine(idx, monkeypatch):
+    seen = _record(monkeypatch, idx)
+    monkeypatch.setattr(di, "_default_retriever", lambda: "hybrid")
+    assert idx.search("事务") == []
+    assert seen["engine"] == "hybrid"
+    assert seen["limit"] == DEFAULT_LIMIT
+    assert seen["include_index"] is False
+
+
+def test_search_forwards_explicit_engine_and_clamps_limit(idx, monkeypatch):
+    seen = _record(monkeypatch, idx)
+    idx.search("事务", retriever="dense", limit=999)
+    assert seen["engine"] == "dense"
+    assert seen["limit"] == MAX_LIMIT
+    idx.search("事务", limit=0)
+    assert seen["limit"] == DEFAULT_LIMIT
+
+
+def test_search_auto_detects_mode_and_version(idx, monkeypatch):
+    seen = _record(monkeypatch, idx)
+    idx.search("Oracle 模式的事务隔离级别")
+    assert seen["mode"] == "Oracle" and seen["auto_mode"] == "Oracle"
+    idx.search("V4.2.5 版本新增了什么")
+    assert seen["version"] == "4.2.5" and seen["auto_version"] == "4.2.5"
+    idx.search("V4.2.5 版本新增了什么", version="4.2.4")
+    assert seen["version"] == "4.2.4" and seen["auto_version"] == ""
+
+
+def test_search_rejects_empty_query(idx):
+    with pytest.raises(DocIndexError):
+        idx.search("   ")
+
+
+def test_search_swallows_retrieval_failure(idx, monkeypatch):
+    """检索层任何意外都只记日志、回空结果，不能变成 500。"""
+    from app.agent import retrieval as retrieval_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("炸了")
+
+    monkeypatch.setattr(retrieval_module, "get_retriever", boom)
+    assert idx.search("事务") == []
+    assert idx.last_retrieval is None
+
+
+# ---- 单例与配置 ----
+
+def test_configure_and_get_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(di, "_default", None)
+    index = di.configure(tmp_path / "doc")
+    assert index.wiki_dir == tmp_path / "doc" / "ob_wiki"
+    assert di.get_index() is index, "configure 之后 get_index 必须复用同一实例"
+    monkeypatch.setattr(di, "_default", None)
+    assert di.get_index().doc_root == di.DEFAULT_DOC_ROOT
+
+
+def test_default_retriever_falls_back_to_sparse(monkeypatch):
+    monkeypatch.setattr(di, "_default_retriever_cache", None)
+
+    def broken():
+        raise RuntimeError("没有配置文件")
+
+    monkeypatch.setattr("app.config.load_settings", broken)
+    assert di._default_retriever() == "sparse"
+
+
 # ---- 工具层 ----
 
 @pytest.fixture
 def doc_tools(wiki, monkeypatch):
-    """把 tools 模块里的 get_index 指到合成语料上，避免碰真文档库与该模块的单例。"""
+    """把 tools 模块里的 get_index 指到合成语料上，避免碰真文档库与该模块的单例。
+
+    工具层契约与检索引擎无关，只把 Milvus 一路换成固定假命中；read_doc 走的仍是真实现。
+    """
     import app.agent.tools as tools_mod
     from app.config import SqlConfig
     from app.tools.ocp.mock import MockOcpClient
 
     index = DocIndex(wiki)
+
+    def fake_search(query, engine, **kwargs):
+        if "隔离级别" not in query:
+            return []
+        return [{
+            "path": "ob_wiki/事务隔离级别/MySQL 模式的事务隔离级别.md",
+            "kind": "doc",
+            "section": "隔离级别设置方法",
+            "title": "MySQL 模式的事务隔离级别",
+            "mode": "MySQL",
+            "version": "",
+            "score": 1.0,
+            "snippet": "MySQL 模式下可以通过 SET TRANSACTION ISOLATION LEVEL 设置事务隔离级别。",
+        }]
+
+    monkeypatch.setattr(index, "_search_milvus", fake_search)
     monkeypatch.setattr(tools_mod, "get_index", lambda: index)
     built = tools_mod.build_tools(MockOcpClient(), SqlConfig(provider="mock"), send_row_data=True)
     return {t.name: t for t in built}
@@ -480,7 +401,6 @@ def test_search_docs_tool_returns_ok_payload(doc_tools):
 
 
 def test_search_docs_tool_empty_result_gives_hint(doc_tools):
-    # 纯 ASCII 生僻词在中文文档库里必然 0 命中（单个 ASCII 字符会被丢弃，不参与匹配）
     out = json.loads(doc_tools["search_docs"].invoke({"query": "zzzqqqxxx"}))
     assert out["ok"] is True
     assert out["hits"] == []

@@ -21,7 +21,6 @@ from app.agent.doc_index import (
     DEFAULT_READ_CHARS,
     DEFAULT_LIMIT,
     DocIndexError,
-    DocIndexMissing,
     DocPathError,
     get_index,
 )
@@ -458,8 +457,6 @@ def build_tools(
                 query, limit=limit or DEFAULT_LIMIT, mode=mode or "",
                 version=version or "", include_index=bool(include_index),
             )
-        except DocIndexMissing as e:
-            return _fail(str(e), kind="not_found")
         except DocIndexError as e:
             return _fail(str(e), kind="error")
         payload = {

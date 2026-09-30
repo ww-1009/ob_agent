@@ -252,6 +252,48 @@ def render(report: dict[str, Any], *, show: int = 8) -> str:
     return "\n".join(lines)
 
 
+def _needs_vectors(retriever: str) -> bool:
+    """dense / hybrid 需要真实向量；sparse（以及默认取配置）只要倒排文本。"""
+    name = (retriever or "").strip().lower()
+    if name in ("dense", "hybrid"):
+        return True
+    if not name:
+        try:
+            from app.config import load_settings
+
+            return load_settings().retrieval.default_retriever in ("dense", "hybrid")
+        except Exception:  # noqa: BLE001 - 配置读不到就按稀疏通道处理
+            return False
+    return False
+
+
+def _rebuild_index(doc_root: Path, *, vectors: bool) -> bool:
+    """``--rebuild``：重建 Milvus 索引（未变的块复用向量，只对新增/改动块调 embedding）。"""
+    from app.agent.embedding import get_embedding_client
+    from app.agent.milvus_build import MODE_REBUILD, MilvusBuilder
+    from app.config import load_settings
+
+    settings = load_settings()
+    embedder = get_embedding_client(settings.embedding) if vectors else None
+    builder = MilvusBuilder(
+        settings.retrieval,
+        embedder=embedder,
+        wiki_dir=doc_root / "ob_wiki",
+        dims=settings.embedding.dims,
+        embedding_model=settings.embedding.model,
+    )
+    try:
+        stats = builder.build(mode=MODE_REBUILD, vectors=vectors, progress=print)
+    except Exception as exc:  # noqa: BLE001 - 建索引失败必须显式失败，不能假装评测过
+        print(f"重建 Milvus 索引失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if embedder is not None:
+            embedder.close()
+    print(f"索引已重建：{stats.summary()}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OceanBase 文档检索评测 / CI 门禁")
     parser.add_argument("--cases", default=str(DEFAULT_CASES), help="用例 JSONL 路径")
@@ -263,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--retriever",
         default="",
-        choices=["", "fts5", "sparse", "dense", "hybrid"],
+        choices=["", "sparse", "dense", "hybrid"],
         help="检索引擎（默认取配置 retrieval.default_retriever）",
     )
     parser.add_argument("--max-nav-top1", type=int, default=-1, help="导航页抢 top1 的上限（<0 不判）")
@@ -271,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--show", type=int, default=8, help="明细里最多列几条")
     parser.add_argument("--json", dest="json_path", default="", help="把完整报告写到该文件")
     parser.add_argument("--strict", action="store_true", help="expect 子串匹配不到任何文档时直接失败")
-    parser.add_argument("--rebuild", action="store_true", help="先重建索引（语料指纹变了会自动重建）")
+    parser.add_argument("--rebuild", action="store_true", help="先重建 Milvus 索引（未变的块复用向量）")
     args = parser.parse_args(argv)
 
     doc_root = Path(args.doc_root)
@@ -291,8 +333,8 @@ def main(argv: list[str] | None = None) -> int:
             return 3
 
     index = DocIndex(doc_root)
-    if args.rebuild:
-        index.ensure(force=True)
+    if args.rebuild and not _rebuild_index(doc_root, vectors=_needs_vectors(args.retriever)):
+        return 3
 
     started = time.perf_counter()
     report = run_eval(index, cases, k=args.k, deep=args.deep, retriever=args.retriever)

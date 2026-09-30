@@ -377,7 +377,7 @@ def test_missing_index_degrades_without_touching_milvus() -> None:
 def test_unknown_retriever_and_empty_query_raise() -> None:
     retriever = make_retriever(StubIndex())
     with pytest.raises(ValueError, match="未知检索器"):
-        retriever.search("分区表", retriever="fts5")
+        retriever.search("分区表", retriever="bogus")
     with pytest.raises(ValueError, match="query 不能为空"):
         retriever.search("   ", retriever="sparse")
 
@@ -445,7 +445,7 @@ def test_real_index_dense_and_hybrid_have_no_degradation(built) -> None:
 
 def _doc_index(tmp_path: Path):
     docs = rt._docs()
-    return docs.DocIndex(doc_root=tmp_path, index_filename=str(tmp_path / "fts.db"))
+    return docs.DocIndex(doc_root=tmp_path)
 
 
 def test_default_retriever_is_read_once_per_process(monkeypatch) -> None:
@@ -464,24 +464,17 @@ def test_default_retriever_is_read_once_per_process(monkeypatch) -> None:
     assert len(calls) == 1
 
 
-def test_doc_index_default_engine_is_still_fts5(built, tmp_path: Path) -> None:
-    """影子模式：不传 retriever 时仍走 FTS5，且不去碰 Milvus。"""
+def test_doc_index_default_engine_is_sparse(built, tmp_path: Path, monkeypatch) -> None:
+    """M7 起不传 retriever 就走配置默认 = Milvus 稀疏，FTS5 分支已删除。"""
+    retriever, _config = built
+    docs = rt._docs()
+    monkeypatch.setattr(rt, "get_retriever", lambda settings=None: retriever)
+    monkeypatch.setattr(docs, "_default_retriever_cache", None)
+    monkeypatch.setattr("app.config.load_settings", lambda *a, **k: Settings(retrieval=RetrievalConfig()))
     index = _doc_index(tmp_path)
     entries = index.search("事务隔离级别", limit=5)
-    assert entries[0]["path"] == "ob_wiki/隔离级别.md"
-    # 注意与 Milvus 路的差异：FTS5 对导航页只降权不排除（-40），include_index=False 也召得回来。
-    assert "ob_wiki/index.md" in [e["path"] for e in entries]
-    assert index.last_retrieval is None
-    assert set(entries[0]) >= {
-        "path",
-        "kind",
-        "section",
-        "title",
-        "mode",
-        "version",
-        "score",
-        "snippet",
-    }
+    assert [e["path"] for e in entries] == ["ob_wiki/隔离级别.md"]
+    assert index.last_retrieval is not None and index.last_retrieval.retriever == "sparse"
 
 
 def test_doc_index_routes_to_milvus_when_retriever_given(built, tmp_path: Path, monkeypatch) -> None:

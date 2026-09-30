@@ -183,7 +183,7 @@ class ChunkPayload:
     canonical: str
     canonical_hash: str
     text_hash: str
-    truncated: bool = False  # 该块超过 max_text_bytes，已被截断（H1-only 文件切不出小节）
+    truncated: bool = False  # 该块超过 max_text_bytes，已被截断（切块后的兜底守卫）
 
     @property
     def content_hash(self) -> str:

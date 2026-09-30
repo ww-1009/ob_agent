@@ -225,8 +225,8 @@ class RetrievalConfig:
     """检索后端（Milvus Lite 单引擎：内建 BM25 稀疏 + FLOAT_VECTOR 稠密）。
 
     milvus_path 相对 backend/ 解析（锚点同 _default_config_path），不随启动 CWD 漂移。
-    default_retriever 是影子模式开关：M5 接线后由它决定默认走哪一路；M7 删除 FTS5 时
-    改为 "hybrid"（在那之前保持 "fts5" 才能与现有行为逐条比对）。
+    default_retriever 决定默认走哪一路：M7 删掉 FTS5 后是 "sparse"（唯一实测过门禁的一路）；
+    dense/hybrid 的真实向量基线跑通后再改这里。
     """
 
     milvus_path: str = "doc/ob_wiki.milvus.db"   # milvus-lite 只认 .db 结尾的本地路径
@@ -243,11 +243,10 @@ class RetrievalConfig:
     query_timeout_seconds: int = 5
     query_cache_size: int = 512
     max_text_bytes: int = 8000     # 倒排文本上限；Milvus 的 VARCHAR max_length 实测按字符计，这里仍按字节保守守卫
-    fingerprint_ttl_seconds: float = 5.0   # 语料指纹缓存 TTL；0 = 不缓存
     version_match_bonus: float = 8.0       # 取回后调整（进入 RRF 前）
     nav_section_penalty: float = 12.0
     nav_file_penalty: float = 40.0
-    default_retriever: str = "fts5"        # fts5 | sparse | dense | hybrid
+    default_retriever: str = "sparse"      # sparse | dense | hybrid（M7 起 FTS5 已删除）
 
     def resolve_milvus_path(self) -> Path:
         p = Path(self.milvus_path)
@@ -256,7 +255,7 @@ class RetrievalConfig:
 
 _ALLOWED_RERANK_MODES = ("auto", "off", "api")
 _ALLOWED_RERANK_PROTOCOLS = ("jina", "dashscope")
-_ALLOWED_RETRIEVERS = ("fts5", "sparse", "dense", "hybrid")
+_ALLOWED_RETRIEVERS = ("sparse", "dense", "hybrid")
 
 
 @dataclass
@@ -341,8 +340,6 @@ def _validate_retrieval(settings: Settings) -> None:
     ):
         if value < low:
             raise ValueError(f"{name} 必须 >= {low}，当前 {value}")
-    if rt.fingerprint_ttl_seconds < 0:
-        raise ValueError(f"retrieval.fingerprint_ttl_seconds 必须 >= 0，当前 {rt.fingerprint_ttl_seconds}")
     if rk.timeout_seconds <= 0:
         raise ValueError(f"rerank.timeout_seconds 必须 > 0，当前 {rk.timeout_seconds}")
 
@@ -520,10 +517,6 @@ def load_settings(
             max_text_bytes=int(
                 _env_nonempty(env, "RETRIEVAL_MAX_TEXT_BYTES") or retrieval_y.get("max_text_bytes", 8000)
             ),
-            fingerprint_ttl_seconds=float(
-                _env_nonempty(env, "RETRIEVAL_FINGERPRINT_TTL_SECONDS")
-                or retrieval_y.get("fingerprint_ttl_seconds", 5.0)
-            ),
             version_match_bonus=float(
                 _env_nonempty(env, "RETRIEVAL_VERSION_MATCH_BONUS")
                 or retrieval_y.get("version_match_bonus", 8.0)
@@ -536,7 +529,7 @@ def load_settings(
                 _env_nonempty(env, "RETRIEVAL_NAV_FILE_PENALTY") or retrieval_y.get("nav_file_penalty", 40.0)
             ),
             default_retriever=_env_nonempty(env, "RETRIEVAL_DEFAULT_RETRIEVER")
-            or retrieval_y.get("default_retriever", "fts5"),
+            or retrieval_y.get("default_retriever", "sparse"),
         ),
         embedding=EmbeddingConfig(
             base_url=_env_nonempty(env, "EMBEDDING_BASE_URL") or embedding_y.get("base_url", ""),

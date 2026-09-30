@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -377,28 +378,40 @@ def test_cli_run_build_without_embedding_reports_error(
     assert _run_build(settings, mode=mb.MODE_INCREMENTAL, args=args, json_out=False) == 1
     assert "no-vectors" in capsys.readouterr().out
 
-def test_oversized_chunk_is_truncated_to_max_text_bytes(tmp_path: Path) -> None:
-    """H1-only 的长文件切不出小节（`_split_chunks` 整篇兜底），必须按 max_text_bytes 截断。
+def test_h1_only_long_file_is_split_not_truncated(tmp_path: Path) -> None:
+    """M7 根治：H1-only 的长文件按 ``MAX_CHUNK_CHARS`` 切块，不再靠 ``max_text_bytes`` 丢后半篇。
 
-    Milvus 的 `text` 是 VARCHAR(max_length=8000)，真语料里有 6 篇 8k–40k 字的这种文件
-    （最大 40363 字，实测直接 code=6 拒收）；embedding 也会超输入上限。
+    真语料里有 6 篇 8k–40k 字的这种文件（最大 ``obshell/错误码.md`` 40363 字），切块后
+    每块都远小于 VARCHAR(max_length=8000)，内容不再被截掉。
     """
     wiki = tmp_path / "ob_wiki"
     wiki.mkdir()
     (wiki / "long.md").write_text("# 巨表\n\n" + "行内容\n" * 4000, encoding="utf-8")
     payloads = mb.scan_corpus(wiki, max_text_bytes=8000)
-    assert len(payloads) == 1
-    payload = payloads[0]
-    assert payload.truncated
-    assert len(payload.text.encode()) <= 8000
-    assert len(payload.canonical.encode()) <= 8000
-    assert payload.text.endswith("…") and payload.canonical.endswith("…")
-    assert payload.text.startswith(" ".join(["long long"] * mb.TITLE_REPEAT + ["巨表"]) + " | ")
+    assert len(payloads) > 1
+    assert not any(p.truncated for p in payloads)
+    assert all(len(p.text.encode()) <= 8000 for p in payloads)
+    assert {p.section for p in payloads} == {"巨表"}
+    # 内容覆盖全文（不再是"只剩前 8000 字节"）
+    assert sum(len(p.text) for p in payloads) > len("行内容\n") * 4000 * 0.9
+    assert payloads[0].text.startswith(" ".join(["long long"] * mb.TITLE_REPEAT + ["巨表"]) + " | ")
+
+
+def test_oversized_chunk_is_truncated_to_max_text_bytes(tmp_path: Path) -> None:
+    """``max_text_bytes`` 仍是硬守卫：切过块之后单块超过上限，照样截断并记账。"""
+    wiki = tmp_path / "ob_wiki"
+    wiki.mkdir()
+    (wiki / "long.md").write_text("# 巨表\n\n" + "行内容\n" * 50, encoding="utf-8")
+    payloads = mb.scan_corpus(wiki, max_text_bytes=64)
+    assert payloads and all(p.truncated for p in payloads)
+    assert all(len(p.text.encode()) <= 64 for p in payloads)
+    assert all(len(p.canonical.encode()) <= 64 for p in payloads)
+    assert payloads[0].text.endswith("…") and payloads[0].canonical.endswith("…")
 
 
 def test_build_reports_truncated_chunks(wiki: Path, config: RetrievalConfig) -> None:
     (wiki / "long.md").write_text("# 巨表\n\n" + "行内容\n" * 4000, encoding="utf-8")
-    builder = make_builder(wiki, config)
+    builder = make_builder(wiki, replace(config, max_text_bytes=64))
     stats = builder.build(mode=mb.MODE_REBUILD, vectors=False)
-    assert stats.truncated == 1
-    assert "截断 1" in stats.summary()
+    assert stats.truncated > 0
+    assert f"截断 {stats.truncated}" in stats.summary()

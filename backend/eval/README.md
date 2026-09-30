@@ -88,6 +88,17 @@ by_tag@5: body 91.67% / hard 63.64% / list 45.45% / literal 92.86%(26/28) / mode
 `literal` 19/28 → **26/28**，`list` 54.55% → 45.45%（唯一退化的档，见下）。
 延迟 P50 与 FTS5（63.6ms）接近，构建到 25077 块只要 73s（`--no-vectors`）。
 
+### M7：删 FTS5 + 分块根治（同一 179 条，sparse 基线待重录）
+
+- **删 FTS5**：`doc_index.py` 925 → 461 行，检索只剩 Milvus 三路，`retrieval.default_retriever`
+  默认 **`sparse`**（hybrid 过门禁后再改配置）；`read_doc` 改为直接读 wiki 文件、不依赖任何
+  索引库——能看到整篇文档的全部小节（FTS5 时代 `chunks` 表每篇最多 2 块，读出来是残缺的）。
+- **分块根治**：`_split_chunks` 对**没有 H2/H3 的长文件**原来走「`h1 or 正文` 整篇一块」兜底，
+  绕过了 1800 字切分，只能按 `max_text_bytes` 截断（真语料 6 篇，最大 `obshell/错误码.md`
+  40363 字）。M7 起兜底路径同样做 1800 字硬切（空行优先），内容不再丢，`max_text_bytes`
+  退回纯守卫（构建侧 `truncated` 只在配置值被压小时才出现）。
+- 代价：这 6 篇的 pk 与文本变了，索引必须 `--rebuild` 一次；sparse 基线要在重建后重录。
+
 做到这一步靠两件事（设计取舍见设计文档 §17）：
 
 1. **客户端列权重重排**：Milvus 内建 BM25 只有一列 `text`（标题/关键词/小节/正文揉在一起），
@@ -129,19 +140,12 @@ FTS5 基线期的弱项（保留作历史对照，其中 `lock-wait`、`backup-o
 **改了排序公式、语料或 `SCHEMA_VERSION` 之后**：先跑一次看数字，确认提升再下调阈值；
 如果是有意取舍（某类变好、另一类变差），把两条曲线都写进 PR 说明再调阈值。
 
-## 指纹 TTL 缓存（延迟基线口径）
+## 指纹 TTL 缓存（已随 FTS5 一起删除）
 
-`search` 每次都要遍历全库 stat 一遍算语料指纹（5146 篇实测 **52.4ms**，曾占端到端近一半）。
-现在指纹带 TTL 缓存（`retrieval.fingerprint_ttl_seconds`，默认 5s；wiki 根目录 mtime 变化、
-`ensure(force=True)` 都会立刻失效）。同一台机器上同一套用例：
-
-| | 均值 | P50 | P95 |
-| --- | --- | --- | --- |
-| 缓存前 | 116.6ms | 118.0ms | 151.0ms |
-| 缓存后 | 62.1ms | 61.3ms | 101.3ms |
-
-代价是往**已有子目录**里新增/修改文件时，索引最迟 TTL 秒后才重建（新增子目录会改根目录
-mtime，能立刻发现）；需要立刻生效就用 `ensure(force=True)` 或把 TTL 设为 0。
+FTS5 时代 `search` 每次都要遍历全库 stat 一遍算语料指纹（5146 篇实测 **52.4ms**，曾占端到端
+近一半），于是加了 `retrieval.fingerprint_ttl_seconds` TTL 缓存（缓存前 P50 118.0ms → 缓存后
+61.3ms，见 git 历史）。**M7 删掉 FTS5 后这条路径整体不存在了**：索引新鲜度由
+`milvus_index --incremental` 的语料指纹短路负责（构建期一次），检索请求不再扫语料目录。
 
 ## 加用例
 

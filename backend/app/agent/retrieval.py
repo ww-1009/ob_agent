@@ -59,7 +59,7 @@ from app.config import RetrievalConfig, Settings, load_settings
 
 logger = logging.getLogger(__name__)
 
-#: 本模块支持的 Milvus 检索器；``fts5`` 由 doc_index 自己处理，不走这里
+#: 支持的检索器；M7 已删掉 FTS5，这里是唯一实现
 RETRIEVERS = ("sparse", "dense", "hybrid")
 
 #: 后置调整的归一化基准：FTS5 侧 ``-bm25`` 的典型跨度（179 条基线实测）
@@ -140,8 +140,9 @@ def _column_tokens(query: str) -> list[str]:
     """列权重重排用的查询词：jieba 分词，丢掉纯标点与单个英文字母。
 
     为什么是 jieba：Milvus 的 ``text`` 字段用的就是 jieba 分析器，客户端用同一套分词，
-    「查询切出来的词」与「语料索引里的词」才会对齐；FTS5 的 ``_query_tokens``（单字 + 双字）
-    在这里反而不合用——实测拿它做重叠分，hit@5 只有 68.7%，且 literal/mode/version 全面下跌。
+    「查询切出来的词」与「语料索引里的词」才会对齐；FTS5 时代的 ``_query_tokens``（单字 +
+    双字，M7 已删）在这里反而不合用——实测拿它做重叠分，hit@5 只有 68.7%，literal/mode/
+    version 全面下跌。
     jieba 首次加载约 0.5s，放在懒加载里（模块 import 时不付这个钱）。
     """
     if not query or not query.strip():
@@ -463,7 +464,7 @@ class MilvusRetriever:
         name = (retriever or config.default_retriever or "hybrid").strip().lower()
         if name not in RETRIEVERS:
             raise ValueError(
-                f"未知检索器：{name!r}（可选 {'/'.join(RETRIEVERS)}；fts5 由 doc_index 处理）"
+                f"未知检索器：{name!r}（可选 {'/'.join(RETRIEVERS)}）"
             )
         started = time.perf_counter()
         out = RetrievalResult(retriever=name)
@@ -563,7 +564,8 @@ class MilvusRetriever:
             ],
             k=int(config.rrf_k),
         )
-        tokens = _docs()._query_tokens(query)
+        # 摘要用同一批 jieba 词：它比 FTS5 的单字/双字 token 更贴正文（别再切一次）
+        tokens = column_tokens
         entries: list[dict[str, Any]] = []
         for pk in sorted(fused, key=lambda key: (-fused[key], key)):
             hit = by_pk[pk]

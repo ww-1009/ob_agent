@@ -137,9 +137,8 @@ def test_retrieval_defaults_when_no_file():
     assert s.retrieval.analyzer == "jieba"
     assert s.retrieval.rrf_k == 60
     assert s.retrieval.pool_k == 50
-    assert s.retrieval.fingerprint_ttl_seconds == 5.0
-    # 影子模式：删除 FTS5 之前默认必须仍是 fts5，否则会直接改掉现网检索行为
-    assert s.retrieval.default_retriever == "fts5"
+    # M7 删掉 FTS5 后默认就是 Milvus 稀疏（唯一过门禁的一路）
+    assert s.retrieval.default_retriever == "sparse"
     assert s.embedding.is_configured is False
     assert s.rerank.mode == "auto"
     assert s.rerank.enabled is False

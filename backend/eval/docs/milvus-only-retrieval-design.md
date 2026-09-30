@@ -363,7 +363,7 @@ python -m app.agent.milvus_index --help               # --limit N / --wiki-dir D
 2. 生成 `pk = xxh64(path#section#seq)` 与 `content_hash`（基于最终 `text`）；`seq` 为同一小节内的块序号（见 §5.1）。
 3. **增量判定**：用 `query_iterator` 扫全库拿 `pk → content_hash`（扫全库才能发现已删除文件的待剪枝 pk）；只对「新增」或「哈希变化」的块调用 embedding；未变的块**跳过费用**。`content_hash` = `sha256(canonical)[:16] + sha256(text)[:16]`——canonical 不含加权前缀，所以 M6 调 `TITLE_REPEAT`/`KEYWORD_REPEAT` 时只重写 `text` 并**复用旧向量**（构建指纹里带 `:t5k2` 权重签名，让这种情况不会误走整库短路）；`embedding_model` 变了则整库重打向量。
 4. 组装行：`text` = `{标题前缀重复} > {小节} | {正文}`（§8.2 的权重复刻），`text` 与 `vector` 一起 `upsert`。
-   - **超长块截断（M4 实测必须）**：`_split_chunks` 对**没有 H2/H3 的文件**走「`h1 or 正文` 整篇一块」兜底，绕过了 1800 字切分——真语料里有 6 篇这样的文件（8k–40k 字，`obshell/错误码.md` 最大 40363 字），Milvus 直接 `code=6, VARCHAR field 'text' value length 16189 exceeds max_length=8000` 拒收，embedding 也会超模型输入上限。构建侧按 `retrieval.max_text_bytes`（默认 8000 **字节**，比 schema 的字符上限保守）截断并补 `…`，`BuildStats.truncated` 记账。**给 M6/M7 的遗留项**：根治办法是让 `_split_chunks` 的兜底路径也走 1800 字硬切，但那会改变 FTS5 的召回结果、让已测的 179 条基线不可比，因此留到 M7 删 FTS5 之后再做。
+   - **超长块截断（M4 实测必须）**：`_split_chunks` 对**没有 H2/H3 的文件**走「`h1 or 正文` 整篇一块」兜底，绕过了 1800 字切分——真语料里有 6 篇这样的文件（8k–40k 字，`obshell/错误码.md` 最大 40363 字），Milvus 直接 `code=6, VARCHAR field 'text' value length 16189 exceeds max_length=8000` 拒收，embedding 也会超模型输入上限。构建侧按 `retrieval.max_text_bytes`（默认 8000 **字节**，比 schema 的字符上限保守）截断并补 `…`，`BuildStats.truncated` 记账。~~给 M6/M7 的遗留项~~ **M7 已根治**：兜底路径改走同一套 `hard_split`（空行优先、否则 1800 字硬切），`max_text_bytes` 退回纯守卫（只有把配置值压到异常小时才会触发截断）。
 5. **剪枝**：删除本次不再存在的 `pk`（文件被删/小节改名）：`delete(filter="pk in [...]")` 分批执行。
 6. 写入 `ob_meta`：`schema_version` / `corpus_fingerprint` / `embedding_model` / `dims` / `analyzer` / `built_at`。
 7. 原子切换临时目录。
@@ -492,7 +492,7 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 
 | 文件 | 动作 | 说明 |
 | --- | --- | --- |
-| [`app/agent/doc_index.py`](../../app/agent/doc_index.py) | **删除 337 行 / 改写约 120 行** | 删除 `_cjk_tokens`、`_query_tokens`、`_BM25_WEIGHTS`、`_STOPWORDS`、`_rank`、`_match`、`_match_expanded`、FTS5 建表、snippet SQL；保留 `_split_chunks`、`_parse_frontmatter`、`_detect_mode`/`_detect_version`、`_is_navigation_section`、`_excerpt`、`read`、`to_wiki_path`、`_fingerprint` |
+| [`app/agent/doc_index.py`](../../app/agent/doc_index.py) | **已完成（M7）**：925 → 461 行（+75/−539） | 删除 `sqlite3`/`argparse`/`json` import、`_cjk_tokens`、`_query_tokens`、`_is_cjk`、`_BM25_WEIGHTS`、`_STOPWORDS`、`_rank`、`_match`、`_match_expanded`、`_fingerprint`/`_scan_fingerprint`/`_dir_mtime_ns`、`invalidate_fingerprint`、`ensure`/`_is_current`/`_build`/`_connect`/`_entry`/`stats`、FTS5 建表与 snippet SQL、`INDEX_FILENAME`/`SCHEMA_VERSION`/`DocIndexMissing`、`_configured_fingerprint_ttl`/`main()`；保留并复用 `_split_chunks`（M7 根治兜底切分）、`_parse_frontmatter`、`_clean_keywords`、`_clean_title`、`_detect_mode`/`_detect_version`/`_normalize_mode`、`_is_navigation_section`、`_excerpt`、`_finalize`、`to_wiki_path`/`to_doc_path`/`_resolve`、`search`（只剩 Milvus 一路）、`read`（直接读文件） |
 | `app/agent/milvus_index.py`（新） | 新增 | Milvus client 封装、schema/function/index 声明、`ob_meta` 读写、原子重建、单进程校验 |
 | `app/agent/retrieval.py`（新，可选拆分） | 新增 | `_sparse_rank`、`_dense_rank`、`_rrf`、后置调优 |
 | `app/agent/rerank.py`（新） | 新增（P2a） | `Reranker` 协议 + `ApiReranker` |
@@ -500,8 +500,8 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 | [`app/agent/tools.py`](../../app/agent/tools.py) | 微改 | 异常分支 `VectorUnavailable` / `RerankUnavailable` → `hint`；**入参 schema 不变** |
 | `app/config.py` | 改 | 新增 `RetrievalConfig`（当前**没有**任何检索配置类，见 §6） |
 | [`backend/requirements.txt`](../../requirements.txt) | 改 | 新增 `pymilvus`、`milvus-lite`、`jieba`（+ 传递依赖 `faiss-cpu`、`pyarrow`、`grpcio`、`protobuf`、`pandas`）；`numpy`、`orjson`、`requests` 已在 |
-| `backend/doc/ob_wiki.index.db` | **删除** | 67.6 MB，FTS5 索引不再需要 |
-| `tests/test_doc_index.py` | 重写 | 现有测试大量针对 FTS5 机制（分词、降权、切片 SQL）；改为针对 Milvus 行为 + 契约 |
+| `backend/doc/ob_wiki.index.db` | **本地保留一个 release 周期**（不再被任何代码引用） | 67.6 MB FTS5 索引；M7 起运行期不再读它，观察一个版本后随下个 release 删除 |
+| `tests/test_doc_index.py` | **已重写（M7）** | 501 → 约 350 行：删掉 FTS5 机制用例（分词/降权/TTL/建库/stats），改为契约用例——frontmatter/keywords/模式与版本识别、`_split_chunks`（含 H1-only 长文件必须切块的回归）、`read` 读文件（小节/TOC/截断/越界/不存在/H1-only 全文可读）、`search` 的参数转发与降级、`configure`/`get_index`、工具层 `search_docs`/`read_doc` 契约 |
 | `tests/test_retrieval_eval.py` | 改 | 真语料评测走 Milvus |
 | [`backend/eval/run_eval.py`](../run_eval.py) | 改 | `--retriever sparse\|dense\|hybrid`、`--min-hit1`；去掉 `--dense-top-n` 等双后端参数 |
 
@@ -667,7 +667,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 
 **执行顺序**：T0 → T1 → **P2a（R1–R3）** → P2b（T2–T7）。理由见 v1 附录 E（实测缺口比例 8:2，重排杠杆大于扩召回），该结论与引擎选择无关，**在 v2 中依然成立**。
 
-**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ `e929ab2`（含指纹 TTL 缓存 + `_default_retriever` 进程内缓存） / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ **稀疏通道已过门禁**（sparse 88.27%/0.768、导航抢 top1 = 0、literal 26/28、P50 67.5ms，`SCHEMA_VERSION=2` + 列权重重排）；dense/hybrid 仍被 embedding 429 配额拦住（全量真实向量 ≈9M tokens） / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）/ M8 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）。
+**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ `e929ab2`（含指纹 TTL 缓存 + `_default_retriever` 进程内缓存；**指纹 TTL 在 M7 随 FTS5 一起删除**） / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ **稀疏通道已过门禁**（sparse 88.27%/0.768、导航抢 top1 = 0、literal 26/28、P50 67.5ms，`SCHEMA_VERSION=2` + 列权重重排）；dense/hybrid 仍被 embedding 配额拦住（全量真实向量 ≈9M tokens；慢建中途还撞到间歇 403 `AccessDenied.Unpurchased`） / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）✅ **代码与测试完成**：`doc_index.py` 925 → 461 行、`config` 去掉 `fingerprint_ttl_seconds`、默认引擎 `sparse`、`read` 改读文件、`_split_chunks` 兜底切分根治、`tests/test_doc_index.py` 重写，全量 `pytest -q` 342 passed（回滚点 tag `fts5-final` → `27ea070`）；**sparse 基线要在 `--rebuild` 后重录一遍**（6 篇长文件的 pk/文本变了） / M8 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）。
 
 > **与 v1 的工作量差异**：v1 17.5 d → v2 17.0 d。删掉 `sqlite_numpy` 与双后端一致性测试省 1.5 d；新增 FTS5 删除（337 行）与测试重写多花约 1.0 d。
 
