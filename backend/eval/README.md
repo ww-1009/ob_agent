@@ -304,3 +304,14 @@ bash run.sh
   `git checkout 27ea070`（tag `fts5-final`）配同一份 `backend/doc/` 起服务，它读 `backend/doc/ob_wiki.index.db`。
   上线后**至少保留一个发布周期的旧镜像与该索引文件**（67.6MB）。另外还有两档配置级止损，不用回滚代码：
   `RETRIEVAL_DEFAULT_RETRIEVER=sparse`（免掉每次查询的 embedding 调用）与 `RERANK_MODE=off`（免掉外部重排调用）。
+- **回滚演练（M8 实测，2026-09-30）**：在 `git worktree add --detach /tmp/m8_rollback 27ea070` 的干净检出里
+  软链同一份 `backend/doc/ob_wiki`，三步全部通过：
+
+  | 步骤 | 命令 | 实测 |
+  | --- | --- | --- |
+  | 1 | `python -m app.agent.doc_index --rebuild --stats` | FTS5：**5146 篇 / 25077 块 / 67.6MB，6s** |
+  | 2 | `python eval/run_eval.py --strict`（旧口径） | 命中率@5 **79.33% ≥ 76%**、MRR **0.706 ≥ 0.68** → **PASS**，25.3s |
+  | 3 | `python -m pytest -q`（旧测试套件） | **344 passed**，154.2s |
+
+  结论：tag `fts5-final` 能在不依赖 Milvus 的情况下独立重建索引并过旧门禁，回滚路径可用。
+  注意旧检出里的 `backend/doc/ob_wiki.index.db` 与 v2 的 `ob_wiki.milvus.db` **同名目录下互不干扰**，演练不会污染现网索引。
