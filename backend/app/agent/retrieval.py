@@ -501,7 +501,14 @@ class MilvusRetriever:
 
         dense_hits: list[Hit] = []
         if name in ("dense", "hybrid"):
-            vector = self._embed_query(query, out)
+            # ``--no-vectors`` 建的库（CI 稀疏通道、无密钥环境）里每行的 vector 都是零向量，
+            # 稠密检索只会按「0 向量的余弦」返回噪声。必须显式降级，不能当真结果给出。
+            if index.has_vectors():
+                vector = self._embed_query(query, out)
+            else:
+                vector = None
+                out.degraded = "dense_unavailable"
+                logger.warning("索引没有稠密向量（--no-vectors 构建）：%s 只走稀疏一路", index.path)
             if vector is None:
                 if name == "dense":  # 纯稠密没有后备路径
                     out.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)

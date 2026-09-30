@@ -316,6 +316,13 @@ def test_no_vectors_build_writes_zero_doc_vectors(wiki: Path, config: RetrievalC
     rows = read_rows(config, config.resolve_milvus_path())
     assert all(all(v == 0.0 for v in row["vector"]) for row in rows.values())
     assert read_meta(config, config.resolve_milvus_path())["embedding_model"] == ""
+    # 检索层靠这个判据决定「稠密一路要不要降级」（零向量的余弦只是噪声）
+    index = MilvusIndex(config, dims=DIMS, path_override=config.resolve_milvus_path())
+    try:
+        assert index.has_vectors() is False
+        assert index.health()["has_vectors"] is False
+    finally:
+        index.close()
 
 
 def test_missing_embedder_raises_without_no_vectors(wiki: Path, config: RetrievalConfig) -> None:

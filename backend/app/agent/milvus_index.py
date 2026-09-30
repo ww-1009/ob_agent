@@ -308,6 +308,7 @@ class MilvusIndex:
     path_override: Path | str | None = None
     _client: MilvusClient | None = field(default=None, repr=False, compare=False)
     _loaded: set[str] = field(default_factory=set, repr=False, compare=False)
+    _has_vectors: bool | None = field(default=None, repr=False, compare=False)
 
     @property
     def path(self) -> Path:
@@ -593,6 +594,20 @@ class MilvusIndex:
                     return int(rows[0][key])
         return len(rows or [])
 
+    def has_vectors(self) -> bool:
+        """库里是否真有稠密向量（``--no-vectors`` 建的库全行零向量，稠密一路必须降级）。
+
+        判据是 ``ob_meta.embedding_model``：构建时 ``vectors=False`` 会把它写成空串。
+        结果缓存一次——索引在进程内不会被换掉（换库要重启）。
+        """
+        if self._has_vectors is None:
+            try:
+                meta = self.read_meta()
+            except MilvusUnavailable:
+                return False
+            self._has_vectors = bool(str(meta.get(META_EMBEDDING_MODEL) or "").strip())
+        return self._has_vectors
+
     def health(self) -> dict[str, Any]:
         """``/api/health`` 用的检索状态：任何失败都降级成可读字段，不抛。"""
         if not self.exists():
@@ -611,6 +626,7 @@ class MilvusIndex:
             "rows": None if missing else self._row_count(),
             "dims": meta.get(META_DIMS),
             "embedding_model": meta.get(META_EMBEDDING_MODEL),
+            "has_vectors": bool(str(meta.get(META_EMBEDDING_MODEL) or "").strip()),
             "built_at": meta.get(META_BUILT_AT),
             "retrieval_degraded": missing,
         }

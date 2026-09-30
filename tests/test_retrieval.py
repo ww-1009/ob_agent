@@ -114,11 +114,13 @@ class StubIndex:
         dense: list[dict] | None = None,
         error: Exception | None = None,
         exists: bool = True,
+        vectors: bool = True,
     ) -> None:
         self.sparse = sparse or []
         self.dense = dense or []
         self.error = error
         self._exists = exists
+        self._vectors = vectors
         self.calls: list[dict] = []
 
     @property
@@ -127,6 +129,9 @@ class StubIndex:
 
     def exists(self) -> bool:
         return self._exists
+
+    def has_vectors(self) -> bool:
+        return self._vectors
 
     def search(self, data, anns_field, limit, *, filter="", output_fields=None, **_kw):
         self.calls.append({"data": data, "field": anns_field, "limit": limit, "filter": filter})
@@ -337,6 +342,23 @@ def test_pure_dense_without_embedder_returns_empty_degraded() -> None:
     result = make_retriever(index, embedder=None).search("分区表", retriever="dense")
     assert result.entries == []
     assert result.degraded == "dense_unavailable"
+
+
+def test_vectorless_index_skips_dense_and_keeps_sparse() -> None:
+    """``--no-vectors`` 建出来的库（CI 稀疏通道）不能把零向量当稠密结果返回。"""
+    index = StubIndex(sparse=[hit(1, 12.0)], dense=[hit(9, 0.99)], vectors=False)
+    embedder = QueryEmbedder()
+    retriever = make_retriever(index, embedder=embedder)
+    # 纯稠密：直接降级，连 embedding 请求都不发（省配额、也不返回噪声）
+    dense = retriever.search("分区表", retriever="dense")
+    assert dense.entries == [] and dense.degraded == "dense_unavailable"
+    assert embedder.embedded == 0
+    # hybrid：保留稀疏一路（RRF 只融合跑起来的那路）
+    hybrid = retriever.search("分区表", retriever="hybrid")
+    assert hybrid.degraded == "dense_unavailable"
+    assert hybrid.pool == {"sparse": 1, "dense": 0}
+    assert [e["path"] for e in hybrid.entries] == ["ob_wiki/dir/pk1.md"] and embedder.embedded == 0
+    assert [c["field"] for c in index.calls] == [FIELD_SPARSE]  # 稠密那两次都没发
 
 
 def test_milvus_failure_degrades_without_raising() -> None:
