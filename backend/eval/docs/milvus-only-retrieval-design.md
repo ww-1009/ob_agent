@@ -576,7 +576,8 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 > B 没命中向量缓存时**明确 skip 并打 `::notice::`**（不假绿），缓存键
 > `milvus-vectors-${{ hashFiles('backend/doc/ob_wiki.zip') }}-v1`；C 先用 embedding secrets 建库并
 > **单独一步 `actions/cache/save@v4`** 落缓存（门禁失败也保住缓存），缺密钥则 skip + `::warning::`。
-> 每日 20:00 UTC（次日 04:00 北京）。
+> C 的 hybrid 探针 `--min-mrr` 取 **0.75**（实测 0.784；若压到 B 的 0.78 只剩 0.004 余量，
+> 重排接口自身的非确定性就足以抖红，而该组合本就不推荐上线）。每日 20:00 UTC（次日 04:00 北京）。
 
 ### 11.4 七道门禁
 

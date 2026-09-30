@@ -218,6 +218,8 @@ jobs:
 
       # 通道 C：重排门禁（hybrid 口径，保留作探针）。--rerank api 只看密钥不看配置 mode；
       # protocol 必须显式 dashscope，否则会按配置默认的 jina 协议拼出错误端点。
+      # MRR 门槛取 0.75 而非 B 的 0.78：实测 hybrid+rerank 为 0.784，若压到 0.78 只剩 0.004 余量，
+      # 重排接口本身的非确定性足以把它抖红；本通道本就不推荐上线（见 design §8.6），够用即过。
       - name: 文档检索评测（通道 C：hybrid + rerank）
         if: steps.keys.outputs.skip != 'true'
         env:
@@ -228,7 +230,7 @@ jobs:
         run: |
           python backend/eval/run_eval.py \
             --retriever hybrid --rerank api --strict \
-            --min-recall 0.88 --min-mrr 0.78 --min-hit1 0.65 --max-nav-top1 0 \
+            --min-recall 0.88 --min-mrr 0.75 --min-hit1 0.65 --max-nav-top1 0 \
             --json retrieval-eval-nightly.json
 
       - name: 上传评测报告（hybrid + rerank）

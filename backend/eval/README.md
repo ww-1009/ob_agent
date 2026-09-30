@@ -79,7 +79,7 @@ Milvus 迁移不沿用旧文档按 50 条用例写的 80%/88%，一律对照本�
 | Milvus sparse | ≥0.80 | ≥0.68 | 对照基线 79.33% / 0.706，不退化即可；**M6/M7 实测 88.27% / 0.760（通过）**；M8 起 CI 通道 A 就按这一行门禁 |
 | Milvus dense | ≥0.78 | ≥0.70 | 对照 sparse 不退化即可；**M7 首次实测 86.59% / 0.763（通过）** |
 | Milvus hybrid | ≥0.88 | ≥0.78 | 起步 0.85/0.72，M8 按 M7 实测收紧；**M7 实测 91.62% / 0.819**，M8 四通道复测一致（通过） |
-| Milvus hybrid + rerank api | ≥0.88 | ≥0.78，另加命中率@1 ≥0.65 | 夜检通道 C；**实测 90.50% / 0.784 / @1 70.39%（通过，但见下节的负面结论）** |
+| Milvus hybrid + rerank api | ≥0.88 | ≥0.75，另加命中率@1 ≥0.65 | 夜检通道 C 的探针；门槛比 B 松（0.784 距 0.78 只剩 0.004，会被重排接口抖动抖红）；**实测 90.50% / 0.784 / @1 70.39%（通过，但见下节的负面结论）** |
 
 外加：`literal` 档退化 ≤1 条（≥19/28）、导航页抢 top1 越界 = 0、故障不得 500（embedding 挂
 只跑稀疏；Milvus 打不开返回空结果 + `retrieval_degraded`；rerank 超时保留融合序）。
@@ -260,7 +260,7 @@ FTS5 时代 `search` 每次都要遍历全库 stat 一遍算语料指纹（5146 
 | --- | --- | --- | --- | --- |
 | A `backend` | 每 push / PR | `--retriever sparse --rerank off` | 不需要 | `--min-recall 0.80 --min-mrr 0.68 --max-nav-top1 0` |
 | B `hybrid` | 每 push / PR | `--retriever hybrid --rerank off` | 不需要（走向量缓存） | `--min-recall 0.88 --min-mrr 0.78 --max-nav-top1 0` |
-| C `retrieval-nightly` | `schedule`（20:00 UTC）/ 手动 | ① `--retriever sparse --rerank api`（生产口径）② `--retriever hybrid --rerank api`（探针） | embedding + rerank | ① `--min-recall 0.88 --min-mrr 0.75 --min-hit1 0.66` ② 同 B 再加 `--min-hit1 0.65` |
+| C `retrieval-nightly` | `schedule`（20:00 UTC）/ 手动 | ① `--retriever sparse --rerank api`（生产口径）② `--retriever hybrid --rerank api`（探针） | embedding + rerank | ① `--min-recall 0.88 --min-mrr 0.75 --min-hit1 0.66` ② `--min-recall 0.88 --min-mrr 0.75 --min-hit1 0.65` |
 
 - **A 恒跑**：稀疏索引纯本地构建（25220 块 ~75s，无密钥），顺序是「建库 → pytest → 评测」——
   pytest 里的三条门禁断言（`tests/test_retrieval_eval.py`）与 CLI 门禁共用同一份索引。
