@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 TOOL_LABEL: dict[str, str] = {
-    "get_tenant_info": "获取租户信息",
+    "list_tenants": "获取租户列表",
+    "get_tenant_info": "获取租户详情",
     "get_cluster_list": "获取集群列表",
     "get_cluster_resource_stats": "获取集群资源水位",
     "get_server_resource_stats": "获取OBServer资源水位",

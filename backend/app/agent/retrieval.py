@@ -290,6 +290,9 @@ class RetrievalResult:
     #: 重排降级标记（与 ``degraded`` 分开：稠密降级后稀疏一路照样可能重排成功，两个降级
     #: 可以同时成立，用单值 ``degraded`` 会互相覆盖）
     rerank_degraded: bool = False
+    #: 因**检索器护栏**主动跳过重排的原因（``""`` = 没跳过）。与 ``rerank_degraded`` 区分：
+    #: 那是「想排但排失败」，这是「按实测结论压根不排」，两者都不该被当成重排生效。
+    rerank_skipped: str = ""
     elapsed_ms: float = 0.0
 
     @property
@@ -613,8 +616,24 @@ class MilvusRetriever:
                 f"未知检索器：{name!r}（可选 {'/'.join(RETRIEVERS)}）"
             )
         rerank_mode = self._resolve_rerank(rerank)
+        # 护栏：``auto``（也是配置默认）只在稀疏一路上成立。M8 四通道实测：hybrid 上开重排
+        # 是净损害——命中率@1 75.98% → 70.39%、MRR 0.819 → 0.784（backend/eval/README.md）。
+        # dense 没有实测（M8 没跑这条通道），但它没有可融合的第二路、重排改的就是稠密自己的
+        # 序，收益上限低于 sparse，没有理由让它比 sparse 更宽松。
+        # 这条结论此前只写在评测报告里靠人自律，现在落到代码：想在这两路上量重排必须显式
+        # 传 ``rerank="api"``（夜检通道 C 就是这么跑的），不会因为配置齐全而被静默打开。
+        rerank_skipped = ""
+        if rerank_mode == "auto" and name != "sparse":
+            rerank_skipped = f"retriever_{name}"
+            rerank_mode = "off"
         started = time.perf_counter()
-        out = RetrievalResult(retriever=name)
+        out = RetrievalResult(retriever=name, rerank_skipped=rerank_skipped)
+        if rerank_skipped:
+            logger.info(
+                "重排按检索器护栏跳过：retriever=%s（auto 只在 sparse 上启用，"
+                "需要重排请显式传 rerank=api）",
+                name,
+            )
         # 只为本次会跑的路预置计数键：提前返回时诊断里也能看出「哪一路没跑/跑出 0 条」
         out.pool = {route: 0 for route in ("sparse", "dense") if name in (route, "hybrid")}
         pool_k = int(pool_k or config.pool_k)

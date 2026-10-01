@@ -36,7 +36,7 @@ def test_system_prompt_names_key_db_tools():
     # 资源水位工具（get_cluster_resource_stats / get_server_resource_stats）自 823a7fa 起
     # 不再写进规则，但仍在 build_tools 注册，模型可按需调用。
     p = system_prompt()
-    for name in ("execute_sql", "get_table_ddl", "get_tenant_info"):
+    for name in ("execute_sql", "get_table_ddl", "list_tenants", "get_tenant_info"):
         assert name in p
 
 

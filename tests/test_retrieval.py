@@ -587,6 +587,84 @@ def test_close_closes_reranker() -> None:
     assert stub.closed is True
 
 
+# ------------------------------------------------ 重排护栏（auto 只在 sparse 上成立）
+
+
+def _two_route_index() -> StubIndex:
+    """两路都给同样的 3 个 pk，保证 hybrid 融合后条目齐全。"""
+    return StubIndex(
+        sparse=[hit(1, 5.0), hit(2, 3.0), hit(3, 1.0)],
+        dense=[hit(1, 0.9), hit(2, 0.5), hit(3, 0.1)],
+    )
+
+
+@pytest.mark.parametrize("name", ["hybrid", "dense"])
+def test_rerank_auto_is_skipped_on_non_sparse_retrievers(name: str) -> None:
+    """M8 实测：hybrid 上开重排净损害（@1 −5.59pp、MRR −0.035），dense 没有可融合的第二路。
+
+    ``auto`` 是配置默认值，不该把实测为负的组合静默打开——这条以前只写在评测报告里。
+    """
+    stub = StubReranker(error=RuntimeError("护栏失效：重排客户端不该被调用"))
+    result = make_retriever(_two_route_index(), embedder=QueryEmbedder(), reranker=stub).search(
+        "分区表", retriever=name, rerank="auto"
+    )
+    assert stub.calls == []
+    assert result.reranked == 0 and result.rerank_degraded is False
+    assert result.rerank_skipped == f"retriever_{name}"
+
+
+@pytest.mark.parametrize("name", ["hybrid", "dense"])
+def test_rerank_config_default_is_skipped_on_non_sparse_retrievers(name: str) -> None:
+    """不显式传 rerank（走配置默认 auto）时同样要被拦住——这才是生产路径。"""
+    stub = StubReranker()
+    result = make_retriever(_two_route_index(), embedder=QueryEmbedder(), reranker=stub).search(
+        "分区表", retriever=name
+    )
+    assert stub.calls == []
+    assert result.rerank_skipped == f"retriever_{name}"
+
+
+@pytest.mark.parametrize("name", ["hybrid", "dense"])
+def test_rerank_api_still_runs_on_non_sparse_retrievers(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """护栏只拦 auto：显式 api 是「我知道自己在干嘛」，必须放行（夜检通道 C 靠它）。
+
+    这里不能用 ``make_retriever(reranker=stub)`` 注入：``__init__`` 注入时把缓存键写成
+    ``"auto"``（retrieval.py:390-392），传 ``rerank="api"`` 会走 ``_reranker_for`` 的重建分支
+    并冲掉桩。改成打桩 ``get_reranker``，顺便真的走一遍 ``api`` 的构造路径。
+    """
+    stub = StubReranker()
+    monkeypatch.setattr(rt, "get_reranker", lambda _config: stub)
+    result = make_retriever(
+        _two_route_index(),
+        embedder=QueryEmbedder(),
+        rerank_config=RerankConfig(base_url="http://x", model="m"),
+    ).search("分区表", retriever=name, rerank="api")
+    assert len(stub.calls) == 1
+    assert result.reranked > 0
+    assert result.rerank_skipped == ""
+
+
+def test_rerank_auto_still_runs_on_sparse() -> None:
+    """sparse 是 auto 唯一成立的一路，别把护栏收得过头。"""
+    stub = StubReranker()
+    result = make_retriever(_three_hits(), reranker=stub).search(
+        "分区表", retriever="sparse", rerank="auto"
+    )
+    assert len(stub.calls) == 1
+    assert result.reranked == 3
+    assert result.rerank_skipped == ""
+
+
+def test_rerank_off_is_not_reported_as_skipped() -> None:
+    """显式 off 是调用方的选择，不是护栏拦下来的，别混进同一计数。"""
+    result = make_retriever(_three_hits(), reranker=StubReranker()).search(
+        "分区表", retriever="sparse", rerank="off"
+    )
+    assert result.rerank_skipped == ""
+
+
 # ---------------------------------------------------------------- doc_index 接入
 
 

@@ -29,7 +29,8 @@ _END_DESC = f"查看SQL的结束时间。{_TIME_FORMAT_HINT}；不传时默认�
 
 
 class TenantInfoInput(BaseModel):
-    tenant_name: str = Field(description="租户名")
+    cluster_id: int = Field(description="集群的 ID（取自 list_tenants 返回的 clusterId）")
+    tenant_id: int = Field(description="租户的 ID（取自 list_tenants 返回的 tenantId）")
 
 
 class SlowSqlInput(BaseModel):

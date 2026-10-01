@@ -265,6 +265,10 @@ class DocIndex:
         或显式 ``sparse`` / ``dense`` / ``hybrid``。``rerank`` 同理：``""`` 用配置
         ``rerank.mode``（``auto`` 时配置齐了就重排），或显式 ``auto`` / ``off`` / ``api``
         —— 评测要量「没有重排」的基线必须显式传 ``off``。
+
+        ``auto`` 只对 ``sparse`` 生效：hybrid 上重排实测净损害（@1 −5.59pp），dense 没有可融合的
+        第二路，这两路一律按 ``off`` 走并在检索账本里标 ``rerank_skipped``；要在这两路上量重排
+        必须显式传 ``rerank="api"``（见 ``app.agent.retrieval.MilvusRetriever.search`` 的护栏）。
         """
         if not query or not query.strip():
             raise DocIndexError("query 不能为空")

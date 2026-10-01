@@ -16,7 +16,7 @@ from typing import Sequence
 from langchain_core.tools import BaseTool, tool
 from langchain_community.agent_toolkits import FileManagementToolkit
 from app.agent.tool_input import SlowSqlInput, FullSqlTextInput, SqlTopPlanInput, ExecuteSqlInput, SqlExplainInput, \
-     TableDDLInput, ClusterIdInput, DocSearchInput, DocReadInput, PlanCompareInput
+     TableDDLInput, ClusterIdInput, DocSearchInput, DocReadInput, PlanCompareInput, TenantInfoInput
 from app.agent.doc_index import (
     DEFAULT_READ_CHARS,
     DEFAULT_LIMIT,
@@ -234,9 +234,9 @@ def build_tools(
         return executor
 
     @tool
-    def get_tenant_info() -> str:
+    def list_tenants() -> str:
         """
-        获取所有租户信息
+        获取所有租户的信息（含 tenantId 与所属 clusterId，是后续工具取 ID 的唯一入口）
         """
         target_keys = {"id", "clusterId", "clusterName", "obTenantId", "description", "mode", "name"}
         try:
@@ -251,6 +251,27 @@ def build_tools(
                     out["tenantId"] = out.pop("id")
                 filtered_items.append(out)
             return _ok(items=filtered_items)
+        except Exception as e:
+            return _error(e)
+
+    @tool(args_schema=TenantInfoInput)
+    def get_tenant_info(cluster_id: int, tenant_id: int) -> str:
+        """
+        获取指定租户的详细信息（cluster_id / tenant_id 先用 list_tenants 取）
+        """
+        try:
+            tenant = ocp.get_tenant_info(cluster_id, tenant_id)
+            if not isinstance(tenant, dict) or not tenant:
+                return _fail(
+                    f"未找到租户：cluster_id={cluster_id}, tenant_id={tenant_id}"
+                    "（请先用 list_tenants 核对 ID）",
+                    kind="not_found",
+                )
+            # 与 list_tenants 保持同一命名：原始字段 id 是租户 ID，不是集群 ID，交给模型前改名
+            out = dict(tenant)
+            if "id" in out:
+                out["tenantId"] = out.pop("id")
+            return _ok(**out)
         except Exception as e:
             return _error(e)
 
@@ -508,7 +529,8 @@ def build_tools(
             return _fail(str(e), kind="error")
         return _ok(**doc)
 
-    return [get_tenant_info, get_cluster_list, get_cluster_resource_stats, get_server_resource_stats,
+    return [list_tenants, get_tenant_info, get_cluster_list, get_cluster_resource_stats,
+            get_server_resource_stats,
             get_slow_sql,get_full_sql_text, get_sql_top_plan,get_sql_explain, compare_plans,
             execute_sql,get_table_ddl,
             search_docs, read_doc]+file_tools

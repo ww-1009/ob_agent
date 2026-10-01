@@ -20,7 +20,8 @@ python backend/eval/run_eval.py --json /tmp/retrieval-eval.json --show 20
 python backend/eval/run_eval.py --json /tmp/before.json
 
 # 引擎 / 重排对照（M8）：--retriever sparse|dense|hybrid，--rerank auto|off|api
-# 「无重排」基线必须显式 --rerank off —— 本机 config.yaml 里 rerank.mode=auto，配置齐了就会重排
+# 「无重排」基线必须显式 --rerank off。另外 auto 自 M9 起只在 sparse 上生效：非 sparse 传 auto
+# 会被检索层护栏降成 off 并在报告里记 rerank_skipped_cases，比不出差距是护栏在起作用，不是配置没读上
 python backend/eval/run_eval.py --retriever sparse --rerank off --json /tmp/m8_sparse_off.json
 python backend/eval/run_eval.py --retriever hybrid --rerank api --json /tmp/m8_hybrid_api.json
 
@@ -185,8 +186,11 @@ hybrid  --rerank api  70.39%  90.50%  94.41%  0.784   466.2 / 439.9 / 664.2    4
   → 这不是 passage 构造的 bug，而是「重排模型的相关性口径」与评测口径（要的正是那一篇答案文档）
   不一致：融合序已经很强时，重排把靠语义相似上来的页面顶掉了。救法得是**融合分与重排分混合**
   （像列权重重排那样按 β 混），不是纯换序 —— 留作 P3，M8 不动。
-- 结论落到配置上：`rerank.mode` 默认 `auto`（配置齐了就重排）**只在 sparse 上成立**；
-  夜检通道 C 因此先跑生产口径的 `sparse + rerank api` 门禁，再跑 `hybrid + rerank api` 作探针。
+- 结论落到配置上：`rerank.mode` 默认 `auto`（配置齐了就重排）**只在 sparse 上成立**。
+  这一条已从「文档自律」升为**代码护栏**：`MilvusRetriever.search` 在 `retriever != sparse`
+  且模式为 `auto` 时把重排降成 `off`，并把原因写进 `RetrievalResult.rerank_skipped`
+  （报告里的 `rerank_skipped_cases`）；显式 `--rerank api` 不受影响，所以
+  夜检通道 C 仍然是先跑生产口径的 `sparse + rerank api` 门禁，再跑 `hybrid + rerank api` 作探针。
 
 做到这一步靠两件事（设计取舍见设计文档 §17）：
 
@@ -300,6 +304,8 @@ bash run.sh
   `milvus_index_missing` → 按上面第 1 步建库；`milvus_unavailable` → 确认 `--workers 1`、没有别的建索引进程占着库；
   `index_stale` → `--rebuild`；`dense_unavailable` → 稠密一路不可用（embedding 挂了），只走了稀疏，建议换核心词提问；
   `rerank_degraded=True` 但 `degraded=""` → 结果按融合序返回，质量略降但功能可用。
+  `rerank_skipped="retriever_hybrid|retriever_dense"` → 不是失败，是护栏按「auto 只在 sparse
+  上成立」主动没排（要在这两路上量重排得显式 `--rerank api`）。
 - **回滚演练**：v2 没有 `RETRIEVAL_PROVIDER=fts5` 这种一键开关（FTS5 代码已删），退路是**镜像**：
   `git checkout 27ea070`（tag `fts5-final`）配同一份 `backend/doc/` 起服务，它读 `backend/doc/ob_wiki.index.db`。
   上线后**至少保留一个发布周期的旧镜像与该索引文件**（67.6MB）。另外还有两档配置级止损，不用回滚代码：

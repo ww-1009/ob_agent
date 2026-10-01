@@ -164,6 +164,8 @@ def run_eval(
     ``sparse`` / ``dense`` / ``hybrid`` 走 Milvus（引擎迁移期三路对照用）。
     ``rerank`` 同样透传：默认 ``off`` 让「无重排」基线可复现，量生产口径要显式 ``api``
     （配置合并原则见设计文档 §8.6）；重排发生在融合之后、limit 截断之前。
+    注意 ``auto`` 在非 ``sparse`` 上会被检索层护栏直接降成 ``off``（报告里记
+    ``rerank_skipped_cases``）——要量「hybrid + 重排」必须显式传 ``api``。
     """
     deep = max(deep, k)
     rows: list[dict[str, Any]] = []
@@ -201,6 +203,9 @@ def run_eval(
                 "fused_top1": fused_top1 or (str(hits_k[0].get("path") or "") if hits_k else ""),
                 "reranked": bool(getattr(state, "reranked", 0)),
                 "rerank_degraded": bool(getattr(state, "rerank_degraded", False)),
+                # 护栏主动跳过（auto 只在 sparse 上生效）：与「降级」分开记，否则
+                # 「hybrid + auto」跑出来会像「重排跑了但没动」，看不出压根没跑
+                "rerank_skipped": str(getattr(state, "rerank_skipped", "")),
                 "latency_ms": round(latency_ms, 1),
             }
         )
@@ -224,6 +229,7 @@ def run_eval(
         "mrr": round(mrr, 4),
         "reranked_cases": sum(1 for row in rows if row["reranked"]),
         "rerank_degraded_cases": sum(1 for row in rows if row["rerank_degraded"]),
+        "rerank_skipped_cases": sum(1 for row in rows if row["rerank_skipped"]),
         # 重排把 top1 换人的用例数：回答「重排到底动了多少」这个问题
         "rerank_moved": sum(1 for row in rows if row["top1"] != row["fused_top1"]),
         "latency_ms": {
@@ -293,7 +299,8 @@ def render(report: dict[str, Any], *, show: int = 8) -> str:
         rerank_note += (
             f"（重排 {report.get('reranked_cases', 0)} 条"
             f"，top1 换人 {report.get('rerank_moved', 0)} 条"
-            f"，降级 {report.get('rerank_degraded_cases', 0)} 条）"
+            f"，降级 {report.get('rerank_degraded_cases', 0)} 条"
+            f"，护栏跳过 {report.get('rerank_skipped_cases', 0)} 条）"
         )
     lines = [
         f"检索评测: {report['count']} 条用例 "
