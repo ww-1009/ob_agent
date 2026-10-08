@@ -49,5 +49,7 @@ elif ! "$PY" -c "import $REQUIRED_IMPORTS" >/dev/null 2>&1; then
   exit 1
 fi
 
-# 直接用 venv 解释器而非 activate，避免依赖 PATH 改动
-exec "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 直接用 venv 解释器而非 activate，避免依赖 PATH 改动。
+# --workers 1 是硬要求，不是性能建议：HITL 确认通道、同一 thread 的串行锁、以及进程内
+# 单例的 Milvus Lite 连接都是进程内实现，多 worker 会导致审批 404/503、索引库被重复打开。
+exec "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1

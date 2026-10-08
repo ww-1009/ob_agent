@@ -37,10 +37,14 @@ DEFAULT_CASES = EVAL_DIR / "retrieval_cases.jsonl"
 DEFAULT_DOC_ROOT = _BACKEND / "doc"
 DEFAULT_K = 5
 DEFAULT_DEEP = 10
-# 门禁阈值：基线实测命中率@5 = 82%、MRR@10 = 0.704（50 条用例、5146 篇真语料），
-# 阈值取「基线往下留一点」，只在真正退化时失败；改了排序公式就重新量一遍再调这里。
-DEFAULT_MIN_RECALL = 0.80
+# 门禁阈值：基线实测命中率@5 = 79.33%、MRR@10 = 0.706（179 条用例、5146 篇真语料，FTS5 基线）。
+# 分档（命中率@5）：version 100% / mode 91.67% / body 85.00% / nav 80.00% / literal 67.86% /
+# list 54.55% / hard 54.55%。阈值取「基线往下留一点」，只在真正退化时失败；
+# 改了排序公式、语料或评测集就重新量一遍再调这里。
+DEFAULT_MIN_RECALL = 0.76
 DEFAULT_MIN_MRR = 0.68
+#: 导航页（index.md / README.md）抢 top1 的文件名口径，与 doc_index._NAV_FILENAMES 一致。
+_NAV_FILENAMES = frozenset({"index.md", "readme.md"})
 
 
 @dataclass(frozen=True)
@@ -134,24 +138,55 @@ def _percentile(values: Sequence[float], ratio: float) -> float:
     return ordered[index]
 
 
+def _source_of(hit: dict[str, Any]) -> str:
+    """命中来自哪一路（``sources`` 字段）：``sparse`` / ``dense`` / ``dense+sparse`` / ``none``。
+
+    混合检索调权重时最想知道的事：top1 到底是稀疏还是稠密找出来的；这一路是否在拖后腿。
+    """
+    sources = hit.get("sources") or ""
+    if isinstance(sources, (list, tuple, set)):  # 兼容列表口径（当前检索层给的是 "a+b" 串）
+        return "+".join(sorted(str(source) for source in sources)) or "none"
+    return str(sources) or "none"
+
+
 def run_eval(
     index: DocIndex,
     cases: Sequence[Case],
     *,
     k: int = DEFAULT_K,
     deep: int = DEFAULT_DEEP,
+    retriever: str = "",
+    rerank: str = "off",
 ) -> dict[str, Any]:
-    """跑一遍评测。``k`` 走生产口径（limit=k），``deep`` 用于 MRR 与「差一点没进前 k」观测。"""
+    """跑一遍评测。``k`` 走生产口径（limit=k），``deep`` 用于 MRR 与「差一点没进前 k」观测。
+
+    ``retriever`` 透传给 ``DocIndex.search``：``""`` = 配置默认，
+    ``sparse`` / ``dense`` / ``hybrid`` 走 Milvus（引擎迁移期三路对照用）。
+    ``rerank`` 同样透传：默认 ``off`` 让「无重排」基线可复现，量生产口径要显式 ``api``
+    （配置合并原则见设计文档 §8.6）；重排发生在融合之后、limit 截断之前。
+    注意 ``auto`` 在非 ``sparse`` 上会被检索层护栏直接降成 ``off``（报告里记
+    ``rerank_skipped_cases``）——要量「hybrid + 重排」必须显式传 ``api``。
+    """
     deep = max(deep, k)
     rows: list[dict[str, Any]] = []
     for case in cases:
         kwargs = case.search_kwargs()
         started = time.perf_counter()
-        hits_k = index.search(case.query, limit=k, **kwargs)
+        hits_k = index.search(case.query, limit=k, retriever=retriever, rerank=rerank, **kwargs)
         latency_ms = (time.perf_counter() - started) * 1000
-        hits_deep = hits_k if deep == k else index.search(case.query, limit=deep, **kwargs)
+        # 重排状态只能从 last_retrieval 取（entries 里只有「重排过」的痕迹，降级与否没有）
+        state = getattr(index, "last_retrieval", None)
+        hits_deep = (
+            hits_k
+            if deep == k
+            else index.search(case.query, limit=deep, retriever=retriever, rerank=rerank, **kwargs)
+        )
         rank_k, matched_k = match_rank(hits_k, case.expect)
         rank_deep, matched_deep = match_rank(hits_deep, case.expect)
+        # 融合名次（重排前）的 top1：与重排后的 top1 对比，量「重排把几条答案挪到了第一」
+        fused_top1 = next(
+            (str(hit.get("path") or "") for hit in hits_k if hit.get("fused_rank") == 1), ""
+        )
         rows.append(
             {
                 "id": case.id,
@@ -164,6 +199,13 @@ def run_eval(
                 "matched": matched_k or matched_deep,
                 "top1": str(hits_k[0].get("path") or "") if hits_k else "",
                 "top1_score": round(float(hits_k[0].get("score") or 0.0), 2) if hits_k else None,
+                "top1_source": _source_of(hits_k[0]) if hits_k else "",
+                "fused_top1": fused_top1 or (str(hits_k[0].get("path") or "") if hits_k else ""),
+                "reranked": bool(getattr(state, "reranked", 0)),
+                "rerank_degraded": bool(getattr(state, "rerank_degraded", False)),
+                # 护栏主动跳过（auto 只在 sparse 上生效）：与「降级」分开记，否则
+                # 「hybrid + auto」跑出来会像「重排跑了但没动」，看不出压根没跑
+                "rerank_skipped": str(getattr(state, "rerank_skipped", "")),
                 "latency_ms": round(latency_ms, 1),
             }
         )
@@ -176,6 +218,8 @@ def run_eval(
     # MRR 口径：命中取排名倒数，未命中记 0（顺序敏感，衡量「答案够不够靠前」）
     mrr = sum((1.0 / rank) if rank else 0.0 for rank in ranks) / total if total else 0.0
     report: dict[str, Any] = {
+        "retriever": retriever or "default",
+        "rerank": rerank or "default",
         "k": k,
         "deep": deep,
         "count": total,
@@ -183,6 +227,11 @@ def run_eval(
         "hit_at_deep": round(hits_at_deep / total, 4) if total else 0.0,
         "recall_at_1": round(sum(1 for row in rows if row["rank"] == 1) / total, 4) if total else 0.0,
         "mrr": round(mrr, 4),
+        "reranked_cases": sum(1 for row in rows if row["reranked"]),
+        "rerank_degraded_cases": sum(1 for row in rows if row["rerank_degraded"]),
+        "rerank_skipped_cases": sum(1 for row in rows if row["rerank_skipped"]),
+        # 重排把 top1 换人的用例数：回答「重排到底动了多少」这个问题
+        "rerank_moved": sum(1 for row in rows if row["top1"] != row["fused_top1"]),
         "latency_ms": {
             "mean": round(statistics.fmean(latencies), 1) if latencies else 0.0,
             "p50": round(_percentile(latencies, 0.5), 1),
@@ -191,7 +240,15 @@ def run_eval(
         "cases": rows,
         "misses": [row for row in rows if not row["rank_deep"]],
         "late": [row for row in rows if row["rank_deep"] and row["rank_deep"] > k],
+        # 导航页抢 top1：``include_index=False`` 的提问（要答案不要清单）里，top1 却是
+        # index.md/README.md。这是硬门禁（设计文档 §8.4），不是分数指标。
+        "nav_top1": [
+            {"id": row["id"], "query": row["query"], "top1": row["top1"]}
+            for row in rows
+            if not row["include_index"] and Path(row["top1"]).name.lower() in _NAV_FILENAMES
+        ],
     }
+    report["nav_top1_violations"] = len(report["nav_top1"])
     tags = sorted({row["tag"] for row in rows if row["tag"]})
     if tags:
         report["by_tag"] = {
@@ -202,24 +259,70 @@ def run_eval(
                     / max(1, sum(1 for row in rows if row["tag"] == tag)),
                     4,
                 ),
+                "hit_at_1": round(
+                    sum(1 for row in rows if row["tag"] == tag and row["rank"] == 1)
+                    / max(1, sum(1 for row in rows if row["tag"] == tag)),
+                    4,
+                ),
             }
             for tag in tags
+        }
+    sources = sorted({row["top1_source"] for row in rows if row["top1_source"]})
+    if sources:
+        report["by_source"] = {
+            source: {
+                "count": sum(1 for row in rows if row["top1_source"] == source),
+                "hit_at_k": round(
+                    sum(
+                        1
+                        for row in rows
+                        if row["top1_source"] == source and row["rank"] and row["rank"] <= k
+                    )
+                    / max(1, sum(1 for row in rows if row["top1_source"] == source)),
+                    4,
+                ),
+                "hit_at_1": round(
+                    sum(1 for row in rows if row["top1_source"] == source and row["rank"] == 1)
+                    / max(1, sum(1 for row in rows if row["top1_source"] == source)),
+                    4,
+                ),
+            }
+            for source in sources
         }
     return report
 
 
 def render(report: dict[str, Any], *, show: int = 8) -> str:
+    rerank = report.get("rerank", "off")
+    rerank_note = f", rerank={rerank}"
+    if rerank != "off":
+        rerank_note += (
+            f"（重排 {report.get('reranked_cases', 0)} 条"
+            f"，top1 换人 {report.get('rerank_moved', 0)} 条"
+            f"，降级 {report.get('rerank_degraded_cases', 0)} 条"
+            f"，护栏跳过 {report.get('rerank_skipped_cases', 0)} 条）"
+        )
     lines = [
-        f"检索评测: {report['count']} 条用例 (k={report['k']}, deep={report['deep']}, 真语料)",
+        f"检索评测: {report['count']} 条用例 "
+        f"(k={report['k']}, deep={report['deep']}, retriever={report['retriever']}{rerank_note}, 真语料)",
         f"  命中率@1  {report['recall_at_1']:.2%}"
         f"   命中率@{report['k']}  {report['hit_at_k']:.2%}"
         f"   命中率@{report['deep']}  {report['hit_at_deep']:.2%}"
         f"   MRR@{report['deep']}  {report['mrr']:.3f}",
         f"  延迟 ms: 均值 {report['latency_ms']['mean']} / P50 {report['latency_ms']['p50']}"
         f" / P95 {report['latency_ms']['p95']}",
+        f"  导航页抢 top1: {report.get('nav_top1_violations', 0)} 条",
     ]
     for tag, stats in (report.get("by_tag") or {}).items():
-        lines.append(f"  [{tag}] {stats['count']} 条, 命中率@{report['k']} {stats['hit_at_k']:.2%}")
+        lines.append(
+            f"  [{tag}] {stats['count']} 条, 命中率@{report['k']} {stats['hit_at_k']:.2%}"
+            f" / @1 {stats.get('hit_at_1', 0.0):.2%}"
+        )
+    for source, stats in (report.get("by_source") or {}).items():
+        lines.append(
+            f"  [top1={source}] {stats['count']} 条, 命中率@{report['k']} {stats['hit_at_k']:.2%}"
+            f" / @1 {stats.get('hit_at_1', 0.0):.2%}"
+        )
     if report["misses"]:
         lines.append(f"  未命中 ({len(report['misses'])}):")
         for row in report["misses"][:show]:
@@ -232,6 +335,48 @@ def render(report: dict[str, Any], *, show: int = 8) -> str:
     return "\n".join(lines)
 
 
+def _needs_vectors(retriever: str) -> bool:
+    """dense / hybrid 需要真实向量；sparse（以及默认取配置）只要倒排文本。"""
+    name = (retriever or "").strip().lower()
+    if name in ("dense", "hybrid"):
+        return True
+    if not name:
+        try:
+            from app.config import load_settings
+
+            return load_settings().retrieval.default_retriever in ("dense", "hybrid")
+        except Exception:  # noqa: BLE001 - 配置读不到就按稀疏通道处理
+            return False
+    return False
+
+
+def _rebuild_index(doc_root: Path, *, vectors: bool) -> bool:
+    """``--rebuild``：重建 Milvus 索引（未变的块复用向量，只对新增/改动块调 embedding）。"""
+    from app.agent.embedding import get_embedding_client
+    from app.agent.milvus_build import MODE_REBUILD, MilvusBuilder
+    from app.config import load_settings
+
+    settings = load_settings()
+    embedder = get_embedding_client(settings.embedding) if vectors else None
+    builder = MilvusBuilder(
+        settings.retrieval,
+        embedder=embedder,
+        wiki_dir=doc_root / "ob_wiki",
+        dims=settings.embedding.dims,
+        embedding_model=settings.embedding.model,
+    )
+    try:
+        stats = builder.build(mode=MODE_REBUILD, vectors=vectors, progress=print)
+    except Exception as exc:  # noqa: BLE001 - 建索引失败必须显式失败，不能假装评测过
+        print(f"重建 Milvus 索引失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if embedder is not None:
+            embedder.close()
+    print(f"索引已重建：{stats.summary()}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OceanBase 文档检索评测 / CI 门禁")
     parser.add_argument("--cases", default=str(DEFAULT_CASES), help="用例 JSONL 路径")
@@ -240,11 +385,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deep", type=int, default=DEFAULT_DEEP, help="MRR 口径的深度")
     parser.add_argument("--min-recall", type=float, default=DEFAULT_MIN_RECALL, help="命中率@k 门禁")
     parser.add_argument("--min-mrr", type=float, default=DEFAULT_MIN_MRR, help="MRR 门禁")
+    parser.add_argument(
+        "--retriever",
+        default="",
+        choices=["", "sparse", "dense", "hybrid"],
+        help="检索引擎（默认取配置 retrieval.default_retriever）",
+    )
+    parser.add_argument("--max-nav-top1", type=int, default=-1, help="导航页抢 top1 的上限（<0 不判）")
+    parser.add_argument(
+        "--min-hit1",
+        type=float,
+        default=-1.0,
+        help="命中率@1 门禁（<0 不判；重排通道用它量「答案直接排第一」的比例）",
+    )
+    parser.add_argument(
+        "--max-p50-ms",
+        type=float,
+        default=-1.0,
+        help="P50 延迟上限毫秒（<0 不判；延迟与机器强相关，只在固定的 nightly 机器上开）",
+    )
+    parser.add_argument(
+        "--rerank",
+        default="off",
+        choices=["auto", "off", "api"],
+        help="后置重排：off（默认，基线可比）/ auto（按配置）/ api（强制走 API 重排）",
+    )
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条（排查用）")
     parser.add_argument("--show", type=int, default=8, help="明细里最多列几条")
     parser.add_argument("--json", dest="json_path", default="", help="把完整报告写到该文件")
     parser.add_argument("--strict", action="store_true", help="expect 子串匹配不到任何文档时直接失败")
-    parser.add_argument("--rebuild", action="store_true", help="先重建索引（语料指纹变了会自动重建）")
+    parser.add_argument("--rebuild", action="store_true", help="先重建 Milvus 索引（未变的块复用向量）")
     args = parser.parse_args(argv)
 
     doc_root = Path(args.doc_root)
@@ -264,11 +434,13 @@ def main(argv: list[str] | None = None) -> int:
             return 3
 
     index = DocIndex(doc_root)
-    if args.rebuild:
-        index.ensure(force=True)
+    if args.rebuild and not _rebuild_index(doc_root, vectors=_needs_vectors(args.retriever)):
+        return 3
 
     started = time.perf_counter()
-    report = run_eval(index, cases, k=args.k, deep=args.deep)
+    report = run_eval(
+        index, cases, k=args.k, deep=args.deep, retriever=args.retriever, rerank=args.rerank
+    )
     total_s = time.perf_counter() - started
     report["problems"] = problems
     report["elapsed_s"] = round(total_s, 1)
@@ -276,19 +448,45 @@ def main(argv: list[str] | None = None) -> int:
     print(render(report, show=args.show))
     recall_ok = report["hit_at_k"] >= args.min_recall
     mrr_ok = report["mrr"] >= args.min_mrr
+    nav_ok = args.max_nav_top1 < 0 or report["nav_top1_violations"] <= args.max_nav_top1
+    hit1_ok = args.min_hit1 < 0 or report["recall_at_1"] >= args.min_hit1
+    p50_ok = args.max_p50_ms < 0 or report["latency_ms"]["p50"] <= args.max_p50_ms
+    nav_gate = (
+        f"   导航页抢 top1 {report['nav_top1_violations']} "
+        f"{'<=' if nav_ok else '>'} {args.max_nav_top1} {'✓' if nav_ok else '✗'}"
+        if args.max_nav_top1 >= 0
+        else ""
+    )
+    hit1_gate = (
+        f"   命中率@1 {report['recall_at_1']:.2%} "
+        f"{'>=' if hit1_ok else '<'} {args.min_hit1:.2%} {'✓' if hit1_ok else '✗'}"
+        if args.min_hit1 >= 0
+        else ""
+    )
+    p50_gate = (
+        f"   P50 {report['latency_ms']['p50']} ms "
+        f"{'<=' if p50_ok else '>'} {args.max_p50_ms:.0f} ms {'✓' if p50_ok else '✗'}"
+        if args.max_p50_ms >= 0
+        else ""
+    )
     print(
         f"  门禁: 命中率@{args.k} {report['hit_at_k']:.2%} "
         f"{'>=' if recall_ok else '<'} {args.min_recall:.2%} {'✓' if recall_ok else '✗'}"
         f"   MRR {report['mrr']:.3f} "
         f"{'>=' if mrr_ok else '<'} {args.min_mrr:.3f} {'✓' if mrr_ok else '✗'}"
+        f"{nav_gate}{hit1_gate}{p50_gate}"
     )
-    print(f"  {'PASS' if recall_ok and mrr_ok else 'FAIL'}（{total_s:.1f}s）")
+    passed = recall_ok and mrr_ok and nav_ok and hit1_ok and p50_ok
+    print(
+        f"  {'PASS' if passed else 'FAIL'}（{total_s:.1f}s，retriever={report['retriever']}"
+        f"，rerank={report['rerank']}）"
+    )
 
     if args.json_path:
         Path(args.json_path).write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    return 0 if recall_ok and mrr_ok else 2
+    return 0 if passed else 2
 
 
 if __name__ == "__main__":

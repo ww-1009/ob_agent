@@ -1,0 +1,55 @@
+{
+ "1_build_25k_real": {
+  "ok": true,
+  "result": {
+   "insert_25k_s": 32.3,
+   "index_wait_iters": 0,
+   "last_status": {
+    "t": 0,
+    "vec_pending": 0,
+    "vec_state": "Finished",
+    "sparse_pending": 0,
+    "sparse_state": "Finished",
+    "row_count": 25000
+   },
+   "load_state": "{'state': <LoadState: Loaded>}",
+   "data_dir_mb": 218.3,
+   "bytes_per_chunk": 8732.0
+  }
+ },
+ "2_steady_latency": {
+  "ok": true,
+  "result": {
+   "steady_state_latency_ms": {
+    "sparse:锁等待的 SQL 怎么看": {
+     "p50": 14.0,
+     "max": 15.1
+    },
+    "sparse:事务隔离级别实现": {
+     "p50": 14.0,
+     "max": 14.1
+    },
+    "sparse:ORA-00942 报错怎么处理": {
+     "p50": 6.1,
+     "max": 6.3
+    },
+    "dense:limit=10": {
+     "p50": 8.3,
+     "max": 10.8
+    },
+    "dense:limit=50": {
+     "p50": 12.8,
+     "max": 15.6
+    }
+   },
+   "data_dir_mb": 239.4
+  }
+ },
+ "3_hybrid_latency": {
+  "ok": true,
+  "result": {
+   "builtin_hybrid_rrf_p50_ms": 20.8,
+   "max_ms": 21.3
+  }
+ }
+}

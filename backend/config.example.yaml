@@ -53,3 +53,64 @@ memory:
 auth:
   enabled: false            # true 时除 /api/health 外所有 /api 都要求 Bearer 令牌
   token: ""                 # 与 enabled=true 搭配；为空会导致后端拒绝启动（fail closed）
+retrieval:
+  # 检索后端（Milvus Lite 单引擎：内建 BM25 稀疏 + FLOAT_VECTOR 稠密）。
+  # milvus_path 相对路径按 backend/ 解析，不随启动目录漂移。
+  milvus_path: "doc/ob_wiki.milvus.db"   # milvus-lite 要求路径以 .db 结尾
+  collection: "ob_chunks"
+  meta_collection: "ob_meta"
+  analyzer: "jieba"            # milvus-lite 3.2.1 的中文分析器类型名必须是 jieba（不是 chinese）
+  dense_index_type: "IVF_FLAT"
+  nlist: 128
+  metric: "COSINE"
+  pool_k: 50                   # 每路融合前的候选数
+  rrf_k: 60                    # 自研 RRF 平滑常数
+  weight_sparse: 1.0
+  weight_dense: 1.0
+  query_timeout_seconds: 5
+  query_cache_size: 512
+  max_text_bytes: 8000         # 入库文本的 UTF-8 字节上限（截断守卫）；Milvus 的 VARCHAR max_length 实测按字符计，故本值更保守
+  version_match_bonus: 8.0     # 取回后、进入 RRF 前的分数调整
+  nav_section_penalty: 12.0
+  nav_file_penalty: 40.0
+  # 默认引擎：sparse | dense | hybrid（M7 起 FTS5 已删除；sparse 是过门禁的那一路）
+  # dense / hybrid 每次查询要调一次 embedding API，需要 embedding 配置齐全；没配就填 sparse
+  default_retriever: "sparse"
+embedding:
+  # OpenAI 兼容根地址，要含 /v1：代码请求 {base_url}/embeddings
+  base_url: "https://<embedding-host>/v1"
+  # ↓↓↓ 在此填入 embedding 模型的 API key ↓↓↓（本地 Ollama/vLLM 可留空，不发 Authorization 头）
+  api_key: ""
+  model: ""                    # 推荐 BAAI/bge-m3；base_url 与 model 都非空才算「已配置」
+  dims: 1024                   # 必须与模型实际输出维度一致，否则启动/建索引会报错
+  batch_size: 16               # 单次 /embeddings 请求条数上限。DashScope 兼容模式硬上限 20，故保守默认 16
+  concurrency: 4               # 建索引时的并发请求数
+  timeout_seconds: 30
+  query_cache_size: 512        # 查询向量 LRU 容量；0 = 不缓存
+rerank:
+  # auto：配置齐全即启用，缺配置静默关闭；off：关闭；api：强制启用（缺配置直接启动失败）
+  mode: "auto"
+  # jina：{base_url}/rerank（Jina / Cohere 兼容）
+  # dashscope：百炼原生 {host}/api/v1/services/rerank/text-rerank/text-rerank
+  #   实测阿里云百炼 compatible-mode/v1 下没有 /rerank（404），必须用 dashscope
+  protocol: "jina"
+  # 兼容形态填到 /v1 根；dashscope 形态会自动从 base_url 反推 host 拼原生路径
+  base_url: "https://<rerank-host>/v1"
+  # ↓↓↓ 在此填入 reranker 模型的 API key ↓↓↓
+  api_key: ""
+  model: ""
+  top_n: 30                    # 送入 rerank 的候选数
+  timeout_seconds: 3.0         # 超时即保留融合原序（不报错）
+  max_passage_chars: 500       # 单条 passage 截断上限
+logging:
+  # 应用日志（标准库 logging）：默认落盘 backend/logs/app.log 并按大小轮转。
+  # file 相对路径按 backend/ 解析，不随启动目录漂移；file: "" = 关闭文件日志、只打控制台。
+  file: "logs/app.log"
+  level: "INFO"                # 级别名必须是标准库认识的（NOTSET/DEBUG/INFO/WARNING/ERROR/CRITICAL）
+  max_bytes: 5000000           # 单文件上限（字节）；<=0 不轮转（文件会一直涨，慎用）
+  backups: 5                   # 保留 app.log.1 … app.log.N
+  console: true                # 应用日志是否同时打 stderr（systemd 下仍进 journalctl）
+  third_party_level: "WARNING" # pymilvus/grpc/httpx/jieba 等的级别，压住库噪声
+  # 注意：RotatingFileHandler 不是多进程安全的；服务端已强制 --workers 1（见 README）。
+  # 需要多 worker 时应改走 journald，或给不同 worker 配不同的 file。
+  # 日志可能含内网主机名/租户名/错误正文，建议目录权限收紧，且不要放在 Web 根目录下。

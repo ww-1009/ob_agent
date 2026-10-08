@@ -7,7 +7,7 @@ from app.tools.ocp.mock import MockOcpClient
 
 def get_ocp_client(settings: Settings):
     if settings.ocp.provider == "real":
-        from app.tools.ocp.real import RealOcpClient  # Task 9 实现
+        from app.tools.ocp.real import RealOcpClient
 
         return RealOcpClient(settings.ocp)
     return MockOcpClient()

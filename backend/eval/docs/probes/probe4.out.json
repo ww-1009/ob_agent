@@ -1,0 +1,155 @@
+{
+ "1_bm25_literal": {
+  "ok": true,
+  "result": {
+   "锁等待的 SQL 怎么看": [
+    [
+     1,
+     6.683
+    ]
+   ],
+   "ORA-00942": [
+    [
+     3,
+     4.412
+    ]
+   ],
+   "00942": [
+    [
+     3,
+     2.137
+    ]
+   ],
+   "4.2.5 版本升级": [
+    [
+     4,
+     8.182
+    ]
+   ],
+   "事务隔离级别": [
+    [
+     2,
+     5.546
+    ]
+   ],
+   "备份": [
+    [
+     5,
+     2.893
+    ]
+   ]
+  }
+ },
+ "2_bm25_scale_latency_size": {
+  "ok": true,
+  "result": {
+   "insert_24k_s": 1.5,
+   "index_ready": true,
+   "rows": 24000,
+   "latency_ms": {
+    "锁等待的 SQL 怎么看|limit=50": {
+     "p50": 30.9,
+     "max": 161.4
+    },
+    "备份恢复|limit=10": {
+     "p50": 22.5,
+     "max": 51.0
+    }
+   },
+   "data_dir_mb": 1.8
+  }
+ },
+ "3_idf_drift": {
+  "ok": true,
+  "result": {
+   "pairs": {
+    "7": [
+     3.120938,
+     3.120938
+    ],
+    "19": [
+     3.120938,
+     3.120938
+    ],
+    "31": [
+     3.120938,
+     3.120938
+    ],
+    "43": [
+     3.120938,
+     3.120938
+    ],
+    "55": [
+     3.120938,
+     3.120938
+    ]
+   },
+   "drifted": []
+  }
+ },
+ "4_bm25_filter": {
+  "ok": true,
+  "result": {
+   "filtered": [
+    [
+     7,
+     "MySQL"
+    ],
+    [
+     19,
+     "MySQL"
+    ],
+    [
+     31,
+     "MySQL"
+    ],
+    [
+     43,
+     "MySQL"
+    ]
+   ],
+   "unfiltered_modes": [
+    "MySQL"
+   ],
+   "filter": "(mode == \"MySQL\" or mode == \"\") and (version == \"\" or version like \"4.2.5%\")"
+  }
+ },
+ "5_builtin_hybrid": {
+  "ok": true,
+  "result": {
+   "hits": [
+    [
+     1,
+     "锁等待 SQL"
+    ],
+    [
+     2,
+     "备份恢复"
+    ]
+   ]
+  }
+ },
+ "6_upsert_delete": {
+  "ok": true,
+  "result": {
+   "before": {
+    "2": "保留 文档 备份"
+   },
+   "after_upsert": {
+    "1": "第二版 内容 事务隔离"
+   },
+   "rows_after_delete": 1
+  }
+ },
+ "7_realistic_5k": {
+  "ok": true,
+  "result": {
+   "insert_5k_s": 11.3,
+   "sparse_p50_ms": 215.1,
+   "dense_p50_ms": 189.3,
+   "data_dir_mb": 43.9,
+   "bytes_per_chunk": 8780.0,
+   "est_25k_dense_sparse_mb": 220.2
+  }
+ }
+}

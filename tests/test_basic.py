@@ -24,6 +24,7 @@ from app.tools.sql.oracle import (
 from app.tools.sql.mysql import MysqlSqlExecutor, resolve_config as resolve_mysql_config
 
 _EXPECTED_TOOLS = {
+    "list_tenants",
     "get_tenant_info",
     "get_cluster_list",
     "get_cluster_resource_stats",
@@ -77,10 +78,32 @@ def test_tool_metadata_is_in_sync_with_registered_tools():
     assert set(CONFIRM_TOOL_LABELS) == {"execute_sql"}
 
 
-def test_get_tenant_info_ok(tools):
-    data = json.loads(tools["get_tenant_info"].invoke({}))
+def test_list_tenants_ok(tools):
+    data = json.loads(tools["list_tenants"].invoke({}))
     assert data["ok"] is True
     assert isinstance(data["items"], list) and data["items"]
+    # 原始字段 id 重命名为 tenantId；clusterId 保留，供 get_tenant_info 直接使用
+    first = data["items"][0]
+    assert "id" not in first and "tenantId" in first and "clusterId" in first
+
+
+def test_get_tenant_info_returns_single_tenant(tools):
+    listed = json.loads(tools["list_tenants"].invoke({}))
+    first = listed["items"][0]
+    data = json.loads(
+        tools["get_tenant_info"].invoke(
+            {"cluster_id": first["clusterId"], "tenant_id": first["tenantId"]}
+        )
+    )
+    assert data["ok"] is True
+    assert data.get("tenantId") == first["tenantId"]
+    assert data["name"] == first["name"]
+    assert "items" not in data  # 详情是单个对象，不再返回列表
+
+
+def test_get_tenant_info_unknown_id_is_not_found(tools):
+    data = json.loads(tools["get_tenant_info"].invoke({"cluster_id": 1, "tenant_id": 999999}))
+    assert data["ok"] is False and data["error_kind"] == "not_found"
 
 
 def test_get_cluster_list_renames_id(tools):

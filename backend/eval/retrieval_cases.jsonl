@@ -1,5 +1,16 @@
-{"id": "isolation-oracle", "query": "Oracle 模式的事务隔离级别是怎么实现的", "expect": ["Oracle 模式的事务隔离级别"]}
-{"id": "isolation-mysql", "query": "MySQL 租户支持哪几种事务隔离级别", "expect": ["MySQL 模式的事务隔离级别"]}
+# 检索评测用例。字段：id / query / expect（路径子串，命中任一即算对）/ mode / version /
+# include_index / tag（分档观测用，见 README）。以 # 开头的行是注释，空行忽略。
+#
+# tag 分档：
+#   literal  精确字面量（错误码、视图名、配置项/系统变量、函数名）—— BM25 应稳拿，M6 用它量退化
+#   mode     MySQL / Oracle 同名文档消歧
+#   version  提问自带版本号
+#   list     清单/总览类（配 include_index=true）
+#   nav      术语、FAQ、简介、快速上手等导航性内容
+#   body     正文细节型自然提问
+#   hard     间接措辞、需要跨文档推断
+{"id": "isolation-oracle", "query": "Oracle 模式的事务隔离级别是怎么实现的", "expect": ["Oracle 模式的事务隔离级别"], "tag": "mode"}
+{"id": "isolation-mysql", "query": "MySQL 租户支持哪几种事务隔离级别", "expect": ["MySQL 模式的事务隔离级别"], "tag": "mode"}
 {"id": "lock-wait", "query": "如何查看锁等待的 SQL", "expect": ["查询行锁", "查死锁"]}
 {"id": "deadlock", "query": "死锁怎么排查", "expect": ["死锁"]}
 {"id": "slow-sql", "query": "慢 SQL 怎么定位和优化", "expect": ["慢查询"]}
@@ -48,3 +59,139 @@
 {"id": "merge-memory", "query": "合并时内存不足怎么办", "expect": ["内存相关问题"]}
 {"id": "timeout-4012", "query": "事务超时 ERROR 4012 怎么处理", "expect": ["事务超时"]}
 {"id": "cursor", "query": "PL 游标怎么用", "expect": ["游标概述", "PL 游标"]}
+# ---- literal：精确字面量（错误码 / 视图 / 配置项 / 系统变量 / 函数）----
+{"id": "lit-ora-00600", "query": "ORA-00600 内部错误怎么排查", "expect": ["错误码（Oracle 模式）/ORA-00000 ~ ORA-00999"], "tag": "literal"}
+{"id": "lit-ora-01555", "query": "ORA-01555 快照过旧", "expect": ["错误码（Oracle 模式）/ORA-01500 ~ ORA-01999"], "tag": "literal"}
+{"id": "lit-ora-04031", "query": "ORA-04031 共享内存不足", "expect": ["错误码（Oracle 模式）/ORA-02000 ~ ORA-04999"], "tag": "literal"}
+{"id": "lit-pls-00201", "query": "PLS-00201 标识符必须声明", "expect": ["错误码（Oracle 模式）/PLS-00000 ~ PLS-00999"], "tag": "literal"}
+{"id": "lit-mysql-1062", "query": "ERROR 1062 Duplicate entry 主键冲突", "expect": ["错误码（MySQL 模式）/0001 ~ 3999"], "tag": "literal"}
+{"id": "lit-mysql-4013", "query": "ERROR 4013 是什么错误", "expect": ["错误码（MySQL 模式）/4000 ~ 4499"], "tag": "literal"}
+{"id": "lit-mysql-6002", "query": "ERROR 6002 事务已经提交", "expect": ["错误码（MySQL 模式）/6000 ~ 6999"], "tag": "literal"}
+{"id": "lit-mysql-9001", "query": "ERROR 9001 租户不存在", "expect": ["错误码（MySQL 模式）/9000 ~ 9499"], "tag": "literal"}
+{"id": "lit-gv-sql-audit", "query": "GV$OB_SQL_AUDIT 里怎么查慢 SQL", "expect": ["内部表/GV$OB_SQL_AUDIT"], "tag": "literal"}
+{"id": "lit-plan-cache-explain", "query": "GV$OB_PLAN_CACHE_PLAN_EXPLAIN 怎么看执行计划缓存", "expect": ["GV$OB_PLAN_CACHE_PLAN_EXPLAIN"], "tag": "literal"}
+{"id": "lit-v-ob-locks", "query": "V$OB_LOCKS 查看当前持锁情况", "expect": ["V$OB_LOCKS"], "tag": "literal"}
+{"id": "lit-zone-major-compaction", "query": "DBA_OB_ZONE_MAJOR_COMPACTION 查合并进度", "expect": ["DBA_OB_ZONE_MAJOR_COMPACTION"], "tag": "literal"}
+{"id": "lit-gv-ob-units", "query": "GV$OB_UNITS 看资源单元分布", "expect": ["GV$OB_UNITS"], "tag": "literal"}
+{"id": "lit-v-system-event", "query": "V$SYSTEM_EVENT 等待事件统计", "expect": ["V$SYSTEM_EVENT"], "tag": "literal"}
+{"id": "lit-gv-sysstat", "query": "GV$SYSSTAT 里的统计项含义", "expect": ["内部表/GV$SYSSTAT"], "tag": "literal"}
+{"id": "lit-enable-sql-audit", "query": "enable_sql_audit 配置项怎么开", "expect": ["配置项/enable_sql_audit"], "tag": "literal"}
+{"id": "lit-audit-trail", "query": "audit_trail 参数取值含义", "expect": ["配置项/audit_trail"], "tag": "literal"}
+{"id": "lit-audit-log-enable", "query": "audit_log_enable 打开审计日志", "expect": ["配置项/audit_log_enable"], "tag": "literal"}
+{"id": "lit-ob-query-timeout", "query": "ob_query_timeout 设置查询超时", "expect": ["ob_query_timeout"], "tag": "literal"}
+{"id": "lit-max-connections", "query": "max_connections 系统变量是什么意思", "expect": ["max_connections"], "tag": "literal"}
+{"id": "lit-func-addtime", "query": "ADDTIME 函数怎么用", "expect": ["日期时间函数/ADDTIME"], "tag": "literal"}
+{"id": "lit-func-sec-to-time", "query": "SEC_TO_TIME 函数", "expect": ["日期时间函数/SEC_TO_TIME"], "tag": "literal"}
+{"id": "lit-func-percent-rank", "query": "PERCENT_RANK 分析函数用法", "expect": ["分析函数/PERCENT_RANK"], "tag": "literal"}
+{"id": "lit-func-json-merge", "query": "JSON_MERGE 函数", "expect": ["JSON_MERGE"], "tag": "literal"}
+{"id": "lit-func-inet-aton", "query": "INET_ATON 函数把 IP 转成整数", "expect": ["其它函数/INET_ATON"], "tag": "literal"}
+{"id": "lit-func-to-blob", "query": "TO_BLOB 转换函数", "expect": ["转换函数/TO_BLOB"], "tag": "literal"}
+{"id": "lit-dbms-profiler", "query": "DBMS_PROFILER 性能分析包", "expect": ["DBMS_PROFILER"], "tag": "literal"}
+{"id": "lit-sa-session-set-label", "query": "SA_SESSION.SET_LABEL 标签安全包", "expect": ["SA_SESSION.SET_LABEL"], "tag": "literal"}
+# ---- mode：MySQL / Oracle 同名文档消歧 ----
+{"id": "mode-oracle-dbms-lob", "query": "Oracle 模式下 LOB 大对象怎么用 DBMS_LOB 包", "expect": ["PL 系统包（Oracle 模式）/DBMS_LOB"], "tag": "mode"}
+{"id": "mode-mysql-show-procedure-status", "query": "MySQL 模式查存储过程列表 SHOW PROCEDURE STATUS", "expect": ["SHOW PROCEDURE STATUS"], "tag": "mode"}
+{"id": "mode-oracle-analyze", "query": "Oracle 模式 ANALYZE 语句怎么用", "expect": ["普通租户（Oracle 模式）/SQL 语句/DCL/ANALYZE"], "tag": "mode"}
+{"id": "mode-mysql-tablespace", "query": "MySQL 模式 CREATE TABLESPACE 创建表空间", "expect": ["普通租户（MySQL 模式）/SQL 语句/CREATE TABLESPACE"], "tag": "mode"}
+{"id": "mode-mysql-replace", "query": "MySQL 模式 REPLACE 函数怎么用", "expect": ["普通租户（MySQL 模式）/函数/单行函数/字符串函数/REPLACE"], "tag": "mode"}
+{"id": "mode-oracle-lower", "query": "Oracle 模式 LOWER 函数", "expect": ["普通租户（Oracle 模式）/函数/单行函数/返回字符串的字符串函数/LOWER"], "tag": "mode"}
+{"id": "mode-oracle-current-timestamp", "query": "Oracle 模式 CURRENT_TIMESTAMP 时间日期函数", "expect": ["普通租户（Oracle 模式）/函数/单行函数/时间日期/CURRENT_TIMESTAMP"], "tag": "mode"}
+{"id": "mode-oracle-extractvalue", "query": "Oracle 模式 EXTRACTVALUE 查询 XMLType", "expect": ["普通租户（Oracle 模式）/函数/单行函数/XML 函数/查询 XMLType 数据的函数/EXTRACTVALUE"], "tag": "mode"}
+{"id": "mode-mysql-json-type", "query": "MySQL 模式 JSON 数据类型的转换规则", "expect": ["普通租户（MySQL 模式）/基本元素/数据类型"], "tag": "mode"}
+{"id": "mode-sys-tenant-modify-ls", "query": "系统租户 ALTER SYSTEM MODIFY LS 怎么用", "expect": ["系统租户/ALTER SYSTEM/MODIFY LS"], "tag": "mode"}
+# ---- version：提问自带版本号 ----
+{"id": "ver-release-timeline", "query": "OceanBase 数据库企业版各版本的发版时间", "expect": ["版本发布记录/OceanBase 数据库企业版"], "tag": "version"}
+{"id": "ver-425-update-log", "query": "V4.2.5 文档更新记录里改了哪些内容", "expect": ["V4.2.5 文档更新记录"], "tag": "version"}
+{"id": "ver-whats-new", "query": "OceanBase What's New 有哪些新特性", "expect": ["What's New"], "tag": "version"}
+{"id": "ver-upgrade-path", "query": "从 V3.x 升级到 V4.x 的步骤", "expect": ["OceanBase 升级"], "tag": "version"}
+{"id": "ver-upgrade-prereq", "query": "升级 OceanBase 之前要做哪些检查", "expect": ["OceanBase 升级"], "tag": "version"}
+{"id": "ver-config-diff-3x4x", "query": "V3.x 与 V4.x 配置项和系统变量有哪些变更", "expect": ["V3.x 与 V4.x 配置项和系统变量变更"], "tag": "version"}
+{"id": "ver-425-sysvar", "query": "V4.2.5 新增了哪些系统变量", "expect": ["V4.2.5 文档更新记录", "系统变量"], "tag": "version"}
+# ---- list：清单/总览类（include_index=true）----
+{"id": "list-error-code-cat", "query": "错误码文档分成哪几类", "expect": ["错误码/index.md"], "include_index": true, "tag": "list"}
+{"id": "list-pl-pkg", "query": "Oracle 模式的 PL 系统包都有哪些", "expect": ["PL 系统包（Oracle 模式）/index.md"], "include_index": true, "tag": "list"}
+{"id": "list-config-sysvar", "query": "配置项和系统变量文档都有哪些内容", "expect": ["配置项和系统变量/index.md"], "include_index": true, "tag": "list"}
+{"id": "list-perf-tuning", "query": "性能调优文档包含哪些章节", "expect": ["性能调优/index.md"], "include_index": true, "tag": "list"}
+{"id": "list-sys-views", "query": "sys 租户的系统视图有哪些", "expect": ["sys 租户系统视图"], "include_index": true, "tag": "list"}
+{"id": "list-mysql-views", "query": "MySQL 租户的系统视图都有哪些", "expect": ["MySQL 租户系统视图"], "include_index": true, "tag": "list"}
+{"id": "list-tools", "query": "OceanBase 的组件和工具都有哪些", "expect": ["组件 & 工具/index.md", "组件 & 工具"], "include_index": true, "tag": "list"}
+{"id": "list-migration-targets", "query": "数据迁移支持从哪些数据库迁到 OceanBase", "expect": ["数据迁移"], "include_index": true, "tag": "list"}
+{"id": "list-backup-modules", "query": "备份恢复的文档包含哪些模块", "expect": ["备份恢复"], "include_index": true, "tag": "list"}
+# ---- nav：术语、FAQ、简介、快速上手 ----
+{"id": "nav-terms", "query": "OceanBase 术语表里 Zone、OBServer 是什么意思", "expect": ["OceanBase 术语"], "tag": "nav"}
+{"id": "nav-faq", "query": "OceanBase 常见问题都有哪些", "expect": ["常见问题"], "tag": "nav"}
+{"id": "nav-quickstart", "query": "怎么快速上手 OceanBase", "expect": ["快速上手"], "tag": "nav"}
+{"id": "nav-intro", "query": "OceanBase 的总体架构是怎样的", "expect": ["OceanBase 简介"], "tag": "nav"}
+{"id": "nav-quickstart-deploy", "query": "如何快速部署一套单机 OceanBase", "expect": ["快速上手", "OceanBase 部署"], "tag": "nav"}
+# ---- body：正文细节型自然提问 ----
+{"id": "body-election", "query": "主副本选举异常导致切主怎么排查", "expect": ["管理数据库/问题排查/选举"], "tag": "body"}
+{"id": "body-idle-txn", "query": "空闲事务是怎么产生的", "expect": ["事务/空闲事务"], "tag": "body"}
+{"id": "body-txn-rollback", "query": "事务回滚失败怎么处理", "expect": ["事务/事务回滚"], "tag": "body"}
+{"id": "body-app-disconnect", "query": "应用和数据库断连怎么排查", "expect": ["应用断连问题排查"], "tag": "body"}
+{"id": "body-no-ob-error-code", "query": "应用报错但错误信息里没有 OceanBase 错误码", "expect": ["应用异常-错误信息中不包含 OceanBase 错误码"], "tag": "body"}
+{"id": "body-backup-fail", "query": "数据备份任务失败了怎么排查", "expect": ["数据备份失败"], "tag": "body"}
+{"id": "body-bad-index", "query": "怎么查看状态异常的索引", "expect": ["查看状态异常的索引"], "tag": "body"}
+{"id": "body-temp-table-count", "query": "怎么查询租户里的临时表数量", "expect": ["查询临时表数量"], "tag": "body"}
+{"id": "body-cpu-skew-ash", "query": "集群里 CPU 占用不均怎么用 ASH 排查", "expect": ["CPU 占用不均问题排查"], "tag": "body"}
+{"id": "body-tenant-type", "query": "租户有哪些类型，sys 租户和普通租户的区别", "expect": ["租户类型"], "tag": "body"}
+{"id": "body-tenant-capacity", "query": "租户容量是怎么计算的", "expect": ["租户容量"], "tag": "body"}
+{"id": "body-tenant-info", "query": "怎么查看租户和资源信息", "expect": ["查看租户和资源信息"], "tag": "body"}
+{"id": "body-standby-intro", "query": "物理备库是什么，能做什么", "expect": ["物理备库概述"], "tag": "body"}
+{"id": "body-standby-limit", "query": "物理备库有哪些使用限制", "expect": ["功能使用限制"], "tag": "body"}
+{"id": "body-recyclebin-switch", "query": "回收站怎么开启和关闭", "expect": ["开启或关闭回收站"], "tag": "body"}
+{"id": "body-arbitration-intro", "query": "仲裁服务是做什么的", "expect": ["仲裁服务概述"], "tag": "body"}
+{"id": "body-arbitration-delete", "query": "怎么为集群删除仲裁服务", "expect": ["为集群删除仲裁服务"], "tag": "body"}
+{"id": "body-data-link", "query": "多副本容灾里的数据链路是怎么走的", "expect": ["数据链路介绍"], "tag": "body"}
+{"id": "body-ha-overview", "query": "OceanBase 高可用的整体设计", "expect": ["高可用概述"], "tag": "body"}
+{"id": "body-observer-dir", "query": "OBServer 节点的安装目录结构", "expect": ["OBServer 节点安装目录结构"], "tag": "body"}
+{"id": "body-multitenant-arch", "query": "多租户架构是怎么实现的", "expect": ["多租户架构概述"], "tag": "body"}
+{"id": "body-arbitration-ha-plan", "query": "仲裁高可用的方案原理", "expect": ["仲裁高可用方案"], "tag": "body"}
+{"id": "body-obdiag", "query": "obdiag 工具怎么用", "expect": ["监控诊断/obdiag"], "tag": "body"}
+{"id": "body-ob-operator", "query": "ob-operator 是做什么的", "expect": ["运维管理/ob-operator"], "tag": "body"}
+{"id": "body-binlog-service", "query": "OceanBase Binlog 服务怎么用", "expect": ["OceanBase Binlog 服务"], "tag": "body"}
+{"id": "body-oms-tidb", "query": "怎么用 OMS 从 TiDB 迁移数据到 OceanBase", "expect": ["从 TiDB 数据库迁移数据到 OceanBase 数据库"], "tag": "body"}
+{"id": "body-dbcat-mysql", "query": "用 DBCAT 迁移 MySQL 表结构到 OceanBase", "expect": ["使用 DBCAT 迁移 MySQL 表结构到 OceanBase 数据库"], "tag": "body"}
+{"id": "body-datax", "query": "用 Datax 把 OceanBase 表数据迁到 MySQL", "expect": ["使用 Datax 迁移 OceanBase 表数据到 MySQL 数据库"], "tag": "body"}
+{"id": "body-bypass-import", "query": "用 INSERT INTO SELECT 做旁路导入", "expect": ["使用 INSERT INTO SELECT 语句旁路导入数据"], "tag": "body"}
+{"id": "body-outfile-migrate", "query": "用 OUTFILE 把数据导出再迁移", "expect": ["使用 OUTFILE 语句导出数据"], "tag": "body"}
+{"id": "body-sql-exec-flow", "query": "一条 SQL 请求在数据库里的执行流程", "expect": ["SQL 请求执行流程"], "tag": "body"}
+{"id": "body-sql-diagnose-method", "query": "业务模型调优里 SQL 诊断怎么做", "expect": ["业务模型调优/SQL 诊断"], "tag": "body"}
+{"id": "body-os-params", "query": "操作系统参数怎么调优", "expect": ["系统调优/操作系统参数调优"], "tag": "body"}
+{"id": "body-mem-params", "query": "内存相关参数怎么调", "expect": ["内存相关参数"], "tag": "body"}
+{"id": "body-net-params", "query": "网络传输相关的数据库参数", "expect": ["网络传输相关参数"], "tag": "body"}
+{"id": "body-io-params", "query": "I/O 相关参数怎么调优", "expect": ["I_O 相关参数"], "tag": "body"}
+{"id": "body-routing-params", "query": "OBProxy 节点路由相关参数", "expect": ["节点路由相关参数"], "tag": "body"}
+{"id": "body-disk-io-tool", "query": "磁盘 I/O 问题用什么工具排查", "expect": ["磁盘 I_O 工具"], "tag": "body"}
+{"id": "body-mem-tool", "query": "内存问题的排查工具", "expect": ["内存工具"], "tag": "body"}
+{"id": "body-net-tool", "query": "网络排查用什么系统工具", "expect": ["网络工具"], "tag": "body"}
+{"id": "body-ash-generate", "query": "怎么生成 ASH 报告", "expect": ["生成 ASH 报告"], "tag": "body"}
+{"id": "body-ash-analyze", "query": "怎么分析 ASH 报告", "expect": ["分析 ASH 报告"], "tag": "body"}
+{"id": "body-ash-intro", "query": "ASH 是什么", "expect": ["ASH 简介"], "tag": "body"}
+{"id": "body-wr-manage", "query": "WR 管理怎么用", "expect": ["管理 WR"], "tag": "body"}
+{"id": "body-wr-history", "query": "怎么监测历史会话性能", "expect": ["监测历史会话性能"], "tag": "body"}
+{"id": "body-tenant-perf", "query": "租户性能诊断怎么做", "expect": ["租户性能诊断"], "tag": "body"}
+{"id": "body-cluster-perf", "query": "集群性能怎么诊断", "expect": ["集群性能诊断"], "tag": "body"}
+{"id": "body-host-monitor", "query": "主机性能监控看哪些指标", "expect": ["主机性能监控"], "tag": "body"}
+{"id": "body-obproxy-monitor", "query": "OBProxy 性能怎么监控", "expect": ["OBProxy 性能监控"], "tag": "body"}
+{"id": "body-access-control", "query": "访问控制是怎么设计的", "expect": ["数据库安全/访问控制"], "tag": "body"}
+{"id": "body-storage-encrypt-theory", "query": "数据存储加密的实现原理", "expect": ["数据库安全/数据存储加密"], "tag": "body"}
+{"id": "body-cluster-arch", "query": "OceanBase 集群架构是怎样的", "expect": ["集群架构"], "tag": "body"}
+{"id": "body-ocp", "query": "OCP 在性能诊断里怎么用", "expect": ["性能相关工具/OCP"], "tag": "body"}
+{"id": "body-obshell", "query": "obshell 怎么管理单机集群", "expect": ["obshell"], "tag": "body"}
+{"id": "body-oms-overview", "query": "OMS 是什么，怎么做数据迁移", "expect": ["OMS"], "tag": "body"}
+{"id": "body-upgrade-check", "query": "升级前怎么检查组件版本兼容性", "expect": ["OceanBase 升级"], "tag": "body"}
+{"id": "body-monitor-metrics", "query": "监控指标里哪些是必须关注的", "expect": ["监控指标"], "tag": "body"}
+{"id": "body-daily-inspection", "query": "OceanBase 日常巡检要做哪些事", "expect": ["日常巡检"], "tag": "body"}
+{"id": "body-emergency", "query": "出现紧急故障时的应急处理流程", "expect": ["应急处理"], "tag": "body"}
+{"id": "body-ls-manage", "query": "日志流怎么管理", "expect": ["日志流管理"], "tag": "body"}
+# ---- hard：间接措辞、需要跨文档推断 ----
+{"id": "hard-leader-switch", "query": "某台机器上的主副本频繁切换，怀疑和仲裁有关，该看什么", "expect": ["异常切主", "仲裁"], "tag": "hard"}
+{"id": "hard-conn-timeout", "query": "业务报连接超时但数据库端看不到慢查询，从哪里查起", "expect": ["应用断连问题排查", "连接"], "tag": "hard"}
+{"id": "hard-space-not-free", "query": "表里数据删了但空间没释放，和合并有关系吗", "expect": ["转储和合并", "合并"], "tag": "hard"}
+{"id": "hard-cpu-skew", "query": "不同租户的 CPU 使用率差异很大怎么定位", "expect": ["CPU 占用不均问题排查"], "tag": "hard"}
+{"id": "hard-backup-stuck", "query": "备份任务一直不结束，怎么查进度和卡点", "expect": ["备份", "备份恢复"], "tag": "hard"}
+{"id": "hard-upgrade-config-conflict", "query": "跨版本升级后配置项不兼容导致起不来怎么办", "expect": ["OceanBase 升级"], "tag": "hard"}
+{"id": "hard-merge-oom", "query": "写 SQL 时报内存不足，是不是合并引起的", "expect": ["内存相关问题"], "tag": "hard"}
+{"id": "hard-archive-stuck", "query": "日志归档进度一直不推进怎么排查", "expect": ["归档", "日志归档"], "tag": "hard"}
+{"id": "hard-drop-table-recover", "query": "误 drop 了表怎么最快找回", "expect": ["恢复回收站对象", "回收站"], "tag": "hard"}
+{"id": "hard-ora-01555-longquery", "query": "长查询跑到一半报快照过旧，和 undo 保留时间有关系吗", "expect": ["错误码（Oracle 模式）/ORA-01500 ~ ORA-01999"], "tag": "hard"}

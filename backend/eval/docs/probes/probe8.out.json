@@ -1,0 +1,53 @@
+{
+ "dir": "/tmp/milvus_spike/data8.db",
+ "rows_target": 25000,
+ "build_and_in_process": {
+  "rows": 25000,
+  "insert_s": 71.3,
+  "rss_mb": 1355.5,
+  "sparse_l50": {
+   "p50": 653.4,
+   "min": 591.0,
+   "max": 698.7
+  },
+  "dense_l50": {
+   "p50": 491.2,
+   "min": 488.8,
+   "max": 513.0
+  },
+  "data_dir_mb": 203.3
+ },
+ "reopened": {
+  "pid": 31584,
+  "collection": "big25k",
+  "rows": 25000,
+  "fields": {
+   "sparse": "sparse",
+   "dense": "vector"
+  },
+  "open_and_load_s": 0.59,
+  "sparse_l50": {
+   "p50": 106.9,
+   "min": 104.9,
+   "max": 109.1
+  },
+  "dense_l50": {
+   "p50": 26.0,
+   "min": 25.3,
+   "max": 28.0
+  },
+  "hybrid_builtin_l10": {
+   "p50": 122.4,
+   "min": 121.1,
+   "max": 126.4
+  },
+  "desc_dense": {
+   "index_type": "IVF_FLAT",
+   "metric_type": "COSINE",
+   "total_rows": 25000,
+   "state": "Finished"
+  },
+  "data_dir_mb": 212.8
+ },
+ "verdict": "构建进程内的读数（build_and_in_process）是伪影，不要当基线；权威基线取 reopened（close 后新进程 reopen 同一 data_dir）。"
+}
