@@ -67,7 +67,7 @@ def system_prompt(now: datetime | None = None) -> str:
         "raw plan trees; pass the *_before / *_after time overrides only when the two plans were "
         "collected in different windows.\n"
         "13. Schema-First Principle: Before generating any SQL query, you must first retrieve the "
-        "structure and column metadata of the target table(s). Table structures can be obtained by "
-        "consulting official documentation or calling the get_table_ddl tool "
-        "(for system views, prefer searching official documentation first).\n"
+        "table structure and column metadata for the target table(s). Table structures can be retrieved "
+        "by invoking the search_docs tool to consult official documentation or by calling the "
+        "get_table_ddl tool directly (for system views, searching official documentation is recommended first).\n"
     )
