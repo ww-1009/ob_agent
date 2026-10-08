@@ -2,8 +2,8 @@
 
 用 tmp_path 里的临时 data_dir 跑真实 milvus-lite（每个测试一个目录，互不占锁）。这里固化的是
 **集合定义与生命周期契约**：schema 形状（BM25 Function / 不可空向量 / jieba 分析器）、小集合
-退回 FLAT、ob_meta 往返与不一致检测、nav 行零向量 + 稠密一路 filter kind=="doc"、
-probe_and_release 真的把目录交还、启动校验的硬错/软告警分界。
+退回 FLAT、ob_meta 往返与不一致检测、查询期语料新鲜度（corpus_changed + TTL 缓存）、
+nav 行零向量 + 稠密一路 filter kind=="doc"、probe_and_release 真的把目录交还、启动校验的硬错/软告警分界。
 
 真语料上的规模与延迟实测见 `backend/eval/docs/probes/probe7.out.json`。
 """
@@ -17,6 +17,8 @@ from pymilvus import DataType, FunctionType
 from app.agent.milvus_index import (
     FIELD_KIND,
     FIELD_PK,
+    META_CORPUS_DIR,
+    META_CORPUS_FINGERPRINT,
     ChunkRow,
     MilvusIndex,
     MilvusIndexMissing,
@@ -47,8 +49,11 @@ def index(tmp_path):
     idx.close()
 
 
-def meta_values(*, dims: int = DIM, text_max_length: int = 8000) -> dict[str, str]:
-    """构建流程实际写入 ob_meta 的**七键**（见 ``milvus_build.py`` 模块头）。"""
+def meta_values(*, dims: int = DIM, text_max_length: int = 8000, corpus_dir: str = "") -> dict[str, str]:
+    """构建流程实际写入 ob_meta 的**八键**（见 ``milvus_build.py`` 模块头）。
+
+    ``corpus_dir`` 默认留空：多数用例不关心语料新鲜度，空值 = 查询期跳过检查。
+    """
     return {
         "schema_version": str(SCHEMA_VERSION),
         "analyzer": "jieba",
@@ -57,6 +62,7 @@ def meta_values(*, dims: int = DIM, text_max_length: int = 8000) -> dict[str, st
         "embedding_model": "test-model",
         "built_at": "2026-09-30T00:00:00",
         "corpus_fingerprint": "100,200,300",
+        "corpus_dir": corpus_dir,
     }
 
 
@@ -206,6 +212,75 @@ def test_empty_meta_on_existing_collections_is_mismatch(index):
     index.client.delete(index.config.meta_collection, filter='key != ""')
     with pytest.raises(MilvusSchemaMismatch, match="为空"):
         index.ensure_collections(create=False)
+
+
+# ---------------------------------------------------------------- 语料新鲜度（查询期）
+
+
+def write_corpus(wiki) -> None:
+    """一本最小语料：一个文件 + 一段正文。"""
+    wiki.mkdir(exist_ok=True)
+    (wiki / "a.md").write_text("## 小节\n\n正文。\n", encoding="utf-8")
+
+
+def write_fresh_meta(index: MilvusIndex, wiki, *, suffix: str = "") -> None:
+    """把 ob_meta 写成「刚从这个目录建完」的样子。"""
+    from app.agent.milvus_build import corpus_fingerprint
+
+    index.write_meta({
+        META_CORPUS_DIR: str(wiki.resolve()),
+        META_CORPUS_FINGERPRINT: corpus_fingerprint(wiki) + suffix,
+    })
+
+
+def test_corpus_changed_is_false_for_fresh_index(index, tmp_path):
+    """线上指纹 = 语料指纹 + ``:t3k0``（加权口径段）：只比前三个字段，后缀不算差异。"""
+    wiki = tmp_path / "ob_wiki"
+    write_corpus(wiki)
+    build(index)
+    write_fresh_meta(index, wiki, suffix=":t3k0")
+    assert index.corpus_changed(ttl_seconds=0) is False
+
+
+def test_corpus_changed_after_corpus_edit(index, tmp_path):
+    wiki = tmp_path / "ob_wiki"
+    write_corpus(wiki)
+    build(index)
+    write_fresh_meta(index, wiki)
+    (wiki / "b.md").write_text("## 新增小节\n\n新文档。\n", encoding="utf-8")
+    assert index.corpus_changed(ttl_seconds=0) is True
+
+
+def test_corpus_changed_without_corpus_dir_is_false(index, tmp_path):
+    """本次改动之前建的库没有 corpus_dir（老库里是空串或整键缺失）：没证据就不报过期，免误报。"""
+    build(index)  # meta_values() 的 corpus_dir 是 ""
+    assert index.corpus_changed(ttl_seconds=0) is False
+
+    index.client.delete(index.config.meta_collection, filter=f'key == "{META_CORPUS_DIR}"')
+    assert index.corpus_changed(ttl_seconds=0) is False
+
+
+def test_corpus_changed_with_missing_corpus_dir_is_false(index, tmp_path):
+    """目录被移走/换个 CWD 找不到：扫不出东西，不算证据（真语料扫描 ~51 ms，不该白扫）。"""
+    build(index)
+    index.write_meta({
+        META_CORPUS_DIR: str(tmp_path / "gone"),
+        META_CORPUS_FINGERPRINT: "1:2:3",
+    })
+    assert index.corpus_changed(ttl_seconds=0) is False
+
+
+def test_corpus_changed_caches_within_ttl(index, tmp_path):
+    """TTL 内的重复查询不再扫盘：语料改了也要等 TTL 过期、或把 TTL 调 0 才看得见。"""
+    wiki = tmp_path / "ob_wiki"
+    write_corpus(wiki)
+    build(index)
+    write_fresh_meta(index, wiki)
+    assert index.corpus_changed(ttl_seconds=60) is False
+
+    (wiki / "b.md").write_text("## 新增小节\n\n新文档。\n", encoding="utf-8")
+    assert index.corpus_changed(ttl_seconds=60) is False, "TTL 内走缓存，不该重扫"
+    assert index.corpus_changed(ttl_seconds=0) is True, "ttl=0 = 每次重扫"
 
 
 # ---------------------------------------------------------------- 行与检索语义

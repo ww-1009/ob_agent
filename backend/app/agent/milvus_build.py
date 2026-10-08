@@ -19,7 +19,9 @@
    所以 ``--rebuild-vectors`` 能重算出与首次构建完全一致的 embedding 输入。
 4. **增量判定**：查回 ``pk → content_hash`` 后分三类（跳过 / 只换文本 / 重打向量）。
 5. **剪枝**：库里存在、本轮语料没有的 ``pk`` → ``delete pk in [...]``（分批）。
-6. **ob_meta 七键**（六键 + ``text_max_length``）。
+6. **ob_meta 八键**（六键 + ``text_max_length``、``corpus_dir``）。``corpus_dir`` 是本次扫描的
+   语料目录（绝对路径）：指纹只是「文件数:总字节:最新 mtime」，**不记目录就没法在查询期复算**，
+   所以两者一起写（查询期比对见 ``MilvusIndex.corpus_changed``）。
 7. **原子切换**：一律在 ``<stem>.building-<pid>.db`` 上建（milvus-lite 只认 .db 结尾的路径），成功后目录级 rename 换入，
    旧目录先改名 ``<stem>.old-<pid>.db`` 做回滚点，切换成功再删。
 
@@ -53,6 +55,7 @@ from .doc_index import (
 from .milvus_index import (
     META_ANALYZER,
     META_BUILT_AT,
+    META_CORPUS_DIR,
     META_CORPUS_FINGERPRINT,
     META_DIMS,
     META_EMBEDDING_MODEL,
@@ -513,6 +516,8 @@ class MilvusBuilder:
                 {
                     META_SCHEMA_VERSION: SCHEMA_VERSION,
                     META_CORPUS_FINGERPRINT: fingerprint,
+                    # resolve() 存绝对路径：查询期可能从别的 CWD 起来，相对路径会指错地方。
+                    META_CORPUS_DIR: str(wiki.resolve()),
                     META_EMBEDDING_MODEL: self.embedding_model if vectors else "",
                     META_DIMS: int(self.dims),
                     META_ANALYZER: self.config.analyzer,

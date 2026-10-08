@@ -23,7 +23,7 @@
 | 融合 | **自研 RRF（`k=60`）**，两路各取 `pool_k=50` 后融合（内建 `RRFRanker` 已验证可用，见 §17.1，当前不采用） |
 | FTS5 | **彻底删除**：虚拟表、4 路召回、CJK 预分词、BM25 手调常数、`ob_wiki.index.db`（67.6 MB）全部移除 |
 | SQLite 侧车 / `sqlite_numpy` | **彻底删除**（生产与单测都只用 Milvus Lite） |
-| 语料陈旧检测 | 新的 `ob_meta` 集合存 `schema_version` / `corpus_fingerprint` / `embedding_model` / `dims`（取代原 `meta` 表） |
+| 语料陈旧检测 | 新的 `ob_meta` 集合存 `schema_version` / `corpus_fingerprint` / `corpus_dir` / `embedding_model` / `dims`（取代原 `meta` 表）；**查询期复算比对**（`MilvusIndex.corpus_changed`，TTL 缓存默认 5 s）不一致时置 `RetrievalResult.index_stale` |
 | Rerank（P2a） | **不变**：API rerank、默认 `auto`、先于稠密/混合落地（理由见 v1 附录 E，实测缺口比例 8:2） |
 | 降级 | embedding 挂 → **只跑稀疏一路**（仍可用）；Milvus 打不开 → 检索整体不可用 + `degraded="milvus_unavailable"`，返回空结果而非 500 |
 | 预估工作量 | **≈17.0 人日** = T0 1.0 + T1 2.0 + 检索重构 11.0 + P2a 3.0；**不含 rerank = 14.0 人日**（见 §15） |
@@ -191,7 +191,8 @@
 检索请求（search_docs）
    │
    ├─ 语料陈旧检测（T0 优化后的 fingerprint 缓存，目标 <5 ms）
-   │     └─ 与 ob_meta 的 corpus_fingerprint 比对 → 不一致则提示重建
+   │     └─ 用 ob_meta 的 corpus_dir 复算指纹，与 corpus_fingerprint 比对（TTL 缓存）
+   │        └─ 不一致 → RetrievalResult.index_stale=True + tools.py 的 hint（结果照给、不抛错）
    │
    ├─ 查询预处理
    │     ├─ 同义词扩展（27 组词表保留，改为**追加到 query 文本**）
@@ -259,7 +260,9 @@ ip.add_index("kind",    index_type="INVERTED")
 | 键 | 值 |
 | --- | --- |
 | `schema_version` | 集合结构版本；不匹配 → 触发重建 |
-| `corpus_fingerprint` | `files,size,newest_mtime_ns`（沿用现有 `_fingerprint()` 三元组） |
+| `corpus_fingerprint` | `文件数:总字节:最新 mtime(ns)` + 加权口径签名 `:t{标题重复}k{关键词重复}`（构建期的短路键；**查询期只比前三段**，后一段是建库参数、无法从语料复算） |
+| `corpus_dir` | 建库时的语料目录**绝对路径**——查询期靠它复算指纹（相对路径会随 CWD 变；`--wiki-dir` 建的库也能对上） |
+| `text_max_length` | 建集合时的 `retrieval.max_text_bytes`；改了即 schema 不一致，要重建（§6） |
 | `embedding_model` / `dims` | 模型或维度变化 → 全量重算 |
 | `analyzer` | `jieba`（记录分词器；更换等于换检索口径，必须重测基线） |
 | `built_at` | 构建时间（运维与排障） |
@@ -351,6 +354,7 @@ rerank:               # P2a，与 v1 一致
 | data_dir 被其他进程占用 | 首次打开 | 同上 `MilvusUnavailable` + `_lock_error_hint` 里的 `--workers 1` 提示；**不是启动失败** |
 | `ob_meta.dims` 与 `embedding.dims` 不一致 | `--verify` / 构建期 `ensure_collections` | `MilvusSchemaMismatch`：`--verify` 报错；构建期不带向量整集重建、带向量要求 `--rebuild-vectors`。**查询路径不跑这项检查**（`MilvusSchemaMismatch` 继承 `MilvusUnavailable`，一旦抛也被 `_MILVUS_ERRORS` 兜住 → `degraded="milvus_unavailable"`，仍不 500） |
 | `ob_meta.text_max_length` 与 `retrieval.max_text_bytes` 不一致 | 同上 | 同上：`--verify` 报错；构建期不带向量整集重建成新上限，带向量要求 `--rebuild-vectors` |
+| `ob_meta.corpus_fingerprint` 与现在的语料复算值不一致 | 查询期：`MilvusRetriever.search` 成功后调 `MilvusIndex.corpus_changed`（TTL `retrieval.fingerprint_ttl_seconds`，默认 5 s） | **不抛错、不改结果**：`RetrievalResult.index_stale = True` + `logger.warning`；`tools.py` 给模型「重建索引」的 hint（`--rebuild`）。信息不足（老库没有 `corpus_dir`、目录不在/为空）→ 不报过期。`_check_meta` **不校验** `corpus_dir`：换目录不是 schema 不一致，只是新鲜度问题 |
 
 ---
 
@@ -374,7 +378,7 @@ python -m app.agent.milvus_index --help               # --limit N / --wiki-dir D
 4. 组装行：`text` = `{标题前缀重复} > {小节} | {正文}`（§8.2 的权重复刻），`text` 与 `vector` 一起 `upsert`。
    - **超长块截断（M4 实测必须）**：`_split_chunks` 对**没有 H2/H3 的文件**走「`h1 or 正文` 整篇一块」兜底，绕过了 1800 字切分——真语料里有 55 篇这样的文件（H1-only 且正文 >1800 字），其中 6 篇正文 >8000 字（8k–40k 字，`组件 & 工具/运维管理/obshell/错误码.md` 最大 40199 字 → 23 块），Milvus 直接 `code=6, VARCHAR field 'text' value length 16189 exceeds max_length=8000` 拒收，embedding 也会超模型输入上限。构建侧按 `retrieval.max_text_bytes`（默认 8000 **字节**，比 schema 的字符上限保守）截断并补 `…`，`BuildStats.truncated` 记账。~~给 M6/M7 的遗留项~~ **M7 已根治**：兜底路径改走同一套 `hard_split`（空行优先、否则 1800 字硬切），`max_text_bytes` 退回纯守卫（只有把配置值压到异常小时才会触发截断）。
 5. **剪枝**：删除本次不再存在的 `pk`（文件被删/小节改名）：`delete(filter="pk in [...]")` 分批执行。
-6. 写入 `ob_meta`（七键）：`schema_version` / `corpus_fingerprint` / `embedding_model` / `dims` / `analyzer` / `text_max_length` / `built_at`。
+6. 写入 `ob_meta`（八键）：`schema_version` / `corpus_fingerprint` / `corpus_dir` / `embedding_model` / `dims` / `analyzer` / `text_max_length` / `built_at`。
 7. 原子切换临时目录。
 
 > **导航文件（`kind='nav'`）写入 `ob_chunks` 但不嵌入**（M3 决议，取代上一版「不写入」的说法）：导航行照常参与稀疏一路，稠密一路恒 `filter kind == "doc"`，因此 `include_index=true` 时导航页仍可出现（走 BM25），而稠密一路永远不会把导航页顶到前面。**为什么必须写进去**：`_is_navigation_section` 的 −40 惩罚与「导航页永不 top1」硬门禁（[tests/test_retrieval_eval.py:71](../../../tests/test_retrieval_eval.py#L71)）都靠这一行的存在；而 `FLOAT_VECTOR` 不可空（probe7 第 1 节），所以导航行的向量写零向量（COSINE 下 distance=0，只要不加过滤也不会盖过真正相关的 doc 行）。**代价**：导航行多占一份 `text` 存储。
@@ -500,7 +504,7 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 | 列权重重排（M6 新增） | 无（原以为前缀重复够用） | `rank_route(..., column_tokens=..., column_alpha=0.5)`：`column_overlap_score()` 按 `title 10 / keywords 6 / section 4 / body 1` 算 jieba 查询词覆盖率 `/21`，`score = (1-alpha)*归一化距离 + alpha*覆盖率`，排序键 `(-score, -base, pk)`；`_column_tokens()` 懒加载 jieba 并缓存（词表失败只 warning → 空 tokens）；**只传给稀疏一路**，dense 不传。实测 70.95%/0.607 → 88.27%/0.768 |
 | 导航文件惩罚（M6 修） | 稀疏一路恒 `-40` | `nav_file_penalty = 0.0 if include_index else config.nav_file_penalty`：FTS5 在 `include_index=True` 时**整条导航文件路由都不跑**，v2 必须同口径（否则清单类提问的导航页被压下去） |
 
-- `RetrievalResult` 账本：`entries / degraded / retriever / pool / sparse_ms / dense_ms / embed_ms / elapsed_ms`；`pool` **只为本次会跑的路预置键**（提前返回时也是 `{"dense": 0}` 而非缺键）。
+- `RetrievalResult` 账本：`entries / degraded / retriever / pool / sparse_ms / dense_ms / embed_ms / elapsed_ms`；另有三个独立布尔标记 `rerank_degraded` / `rerank_skipped` / `index_stale`——**不塞进单值 `degraded`**，因为能与降级同时成立、处置也不同；`pool` **只为本次会跑的路预置键**（提前返回时也是 `{"dense": 0}` 而非缺键）。
 - 条目诊断字段 `sources`（`"dense+sparse"`）/`sparse_rank`/`dense_rank` 在 `doc_index._finalize` **之前**写入，`limit` 截断不会丢诊断。
 - `score` 是 RRF 分（数量级 `1/60`），**与 FTS5 的 BM25 分不可比**；评测器只比 hit/MRR 不比分数。
 - 已知语义差异（M6 评测口径要注意）：FTS5 对导航页只降权不排除，`include_index=False` 下仍可能召回（如 `"事务隔离级别"` 会带上 `index.md`），Milvus 路直接排除；两边靠门禁（导航页不抢 top1）对齐而非逐条一致。
@@ -532,7 +536,7 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 
 **不变量**：任何检索相关故障都**不得**返回 500、不得让 agent 崩溃。
 
-降级的**对外信号只有两个**：`RetrievalResult.degraded`（字符串）与 `RetrievalResult.rerank_degraded`（布尔）；`tools.py` 的 `_DEGRADED_HINTS` 把它翻译成给模型的处置建议（[tools.py:87-98](../../app/agent/tools.py#L87-L98)）。**`/api/health` 当前不含任何检索字段**（只有 `status`/`ocp_provider`/`sql_provider`/`llm_configured`/`memory_enabled`/`auth_enabled`，[chat.py:220-235](../../app/api/chat.py#L220-L235)）；索引侧体检只在 CLI `--health` / `--verify` 上。
+降级的**对外信号有三个**：`RetrievalResult.degraded`（字符串）、`RetrievalResult.rerank_degraded`（布尔）与 `RetrievalResult.index_stale`（布尔；语料陈旧，**不是降级**——结果照给）；`tools.py` 的 `_DEGRADED_HINTS` 把它翻译成给模型的处置建议（[tools.py:87-98](../../app/agent/tools.py#L87-L98)）。**`/api/health` 当前不含任何检索字段**（只有 `status`/`ocp_provider`/`sql_provider`/`llm_configured`/`memory_enabled`/`auth_enabled`，[chat.py:220-235](../../app/api/chat.py#L220-L235)）；索引侧体检只在 CLI `--health` / `--verify` 上。
 
 | 故障 | 行为 | 可观测信号 |
 | --- | --- | --- |
@@ -541,7 +545,7 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 | rerank 端点超时/不可达 | 保留融合顺序 | `rerank_degraded = True`（[retrieval.py:558](../../app/agent/retrieval.py#L558)、`:563`、`:574`、`:580`） |
 | **Milvus data_dir 打不开 / 被锁** | 检索返回空列表 + 说明性 hint（"检索索引不可用"） | `degraded = "milvus_unavailable"`（[retrieval.py:661](../../app/agent/retrieval.py#L661)、`:688`）；CLI `--health` 另报 `retrieval_degraded: true`（[milvus_index.py:622-626](../../app/agent/milvus_index.py#L622-L626)，**新单点**） |
 | data_dir 不存在 | 同上，空结果 | `degraded = "milvus_index_missing"`（[retrieval.py:646](../../app/agent/retrieval.py#L646)）+ `--rebuild --no-vectors` 建议 |
-| 语料已更新但索引未重建 | **完全不检测**：指纹只在构建期用来决定「是否跳过」（[milvus_build.py:434](../../app/agent/milvus_build.py#L434)），查询路径不比对（`retrieval.py` / `doc_index.py` 里没有 `fingerprint`） | 既无 `degraded` 也无别的提示；`_DEGRADED_HINTS` 里的 `index_stale` 文案（[tools.py:94](../../app/agent/tools.py#L94)）**没有任何代码会触发**（v1 的 `_is_current` 随 FTS5 一起删了）——**属遗留缺口，建议补回** |
+| 语料已更新但索引未重建 | **查询期检测（已实现）**：`MilvusRetriever.search` 成功后调 `MilvusIndex.corpus_changed`，用 `ob_meta.corpus_dir` 复算语料指纹、与 `corpus_fingerprint` 的前三段比对（TTL 缓存）；结果照给 | `RetrievalResult.index_stale = True`（[retrieval.py:774](../../app/agent/retrieval.py#L774)）+ `logger.warning`；`tools.py` 在返回里给 `index_stale: true` 与「请重建索引」的 hint（[tools.py:94](../../app/agent/tools.py#L94)）。TTL 由 `retrieval.fingerprint_ttl_seconds` 控制（默认 5.0 s；0 = 每次重扫，真语料 5146 篇扫一遍约 51 ms），所以刚改完语料最多晚一个 TTL 才报；**信息不足时不报**（老库没有 `corpus_dir`、目录不在/为空、扫不出文件） |
 
 > `/api/health` 是只读快照；前端 `HealthBadge` 只读它认识的键（`ocp_provider`/`sql_provider`/`llm_configured`，[HealthBadge.vue:22-26](../../../frontend/src/components/HealthBadge.vue#L22-L26)），所以给 `/api/health` 加检索字段不会破坏界面。**但"把检索健康度暴露出来"目前还没做**——这是 P2 待办，不是既成事实。
 
@@ -624,9 +628,9 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 | 稀疏一路 | 6–14 ms | 中文 query 14 ms；字面 query 6 ms |
 | 稠密一路 | 8–13 ms | limit=10 → 8.3 ms；limit=50 → 12.8 ms |
 | 自研 RRF 融合 | <1 ms | 纯 Python |
-| 语料指纹（现状） | **51.3 ms** | **最大单项**，T0 优化目标 <5 ms |
+| 语料指纹（现状） | **51.3 ms**，按 TTL 摊薄 | T0 优化目标 <5 ms；**查询期只有 §10 的语料陈旧检测会扫它**（`retrieval.fingerprint_ttl_seconds`，默认 5 s 一次），不再是每次查询的固定项 |
 | rerank（API） | 100–500 ms | 两点网络调用 |
-| **合计（rerank off）** | **≈70–100 ms** | 含指纹 |
+| **合计（rerank off）** | **≈70–100 ms** | 指纹按 TTL 摊薄后不再每次计入 |
 | **合计（rerank api）** | **≈170–600 ms** | |
 
 **门禁（比 v1 可收紧）**
@@ -678,7 +682,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 ### 14.2 灰度与验证
 
 - 上线前后各跑一遍全量评测，保存 `--json` 报告 diff（`rescued` / `broken` 逐条解释）。
-- 生产观察：检索结果的 `degraded` / `rerank_degraded` 字段（`tools.py` 会把它翻成给模型的提示）；索引侧另有 CLI `--health` 的 `retrieval_degraded`。`/api/health` **目前不含检索字段**，要先加。
+- 生产观察：检索结果的 `degraded` / `rerank_degraded` / `index_stale` 字段（`tools.py` 会把它翻成给模型的提示）；索引侧另有 CLI `--health` 的 `retrieval_degraded`。`/api/health` **目前不含检索字段**，要先加。
 
 ### 14.3 回滚（**这是 v2 最大的弱点，必须写清楚**）
 
@@ -724,7 +728,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 
 **执行顺序**：T0 → T1 → **P2a（R1–R3）** → P2b（T2–T7）。理由见 v1 附录 E（实测缺口比例 8:2，重排杠杆大于扩召回），该结论与引擎选择无关，**在 v2 中依然成立**。
 
-**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ `e929ab2`（含指纹 TTL 缓存 + `_default_retriever` 进程内缓存；**指纹 TTL 在 M7 随 FTS5 一起删除**） / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ **稀疏通道已过门禁**（sparse 88.27%/0.768、导航抢 top1 = 0、literal 26/28、P50 67.5ms，`SCHEMA_VERSION=2` + 列权重重排）；dense/hybrid 仍被 embedding 配额拦住（全量真实向量 ≈9M tokens；慢建中途还撞到间歇 403 `AccessDenied.Unpurchased`） / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）✅ **完成**：`doc_index.py` 925 → 461 行、`config` 去掉 `fingerprint_ttl_seconds`、默认引擎 `sparse`、`read` 改读文件、`_split_chunks` 兜底切分根治、`tests/test_doc_index.py` 重写，全量 `pytest -q` 342 passed（`d3a0c03` 退避硬化 + `851c746` M7 + `610f02f` CI 建库步骤，已 push；回滚点 tag `fts5-final` → `27ea070`）；分块根治后语料 25077 → **25220 块**、构建 `truncated` 6 → 0；**M7 sparse 重录：命中率@5 88.27% / MRR 0.760 / @10 92.74% / literal 26/28 / 导航抢 top1 = 0（门禁全过）**；**dense/hybrid 首次测出**（全量真向量构建 24138 块 / 962s / `swapped=true` / `verify=ok`）：dense 86.59% / 0.763（P50 175.0ms）、hybrid **91.62% / 0.819**（P50 275.5ms，过 ≥0.85/≥0.72 门禁），`hard` 档 63.64% → 81.82%、`list` 档 45.45% → 36.36% 是唯一退化档，默认引擎仍留 `sparse`（API 依赖 + 延迟是产品取舍） / M8 rerank（P2a=R1–R3）+ 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）✅ **完成**：新建 `backend/app/agent/rerank.py`（`Reranker` 协议 + `ApiReranker`，jina/dashscope 双协议、单次 POST 不重试、失败抛 `RerankUnavailable` 永不 500，`tests/test_rerank.py` 21 例）；`retrieval.py` 把重排接在**融合之后、`MAX_CHUNKS_PER_PATH`/limit 截断之前**，`RetrievalResult` 增 `rerank_ms/reranked/rerank_degraded`，entry 增 `fused_rank/rerank_rank/rerank_score`（`tests/test_retrieval.py` 10 例）；`run_eval.py` 增 `--rerank auto|off|api`、`--min-hit1`、`--max-p50-ms`、`by_source`/`rerank_moved`/`by_tag.hit_at_1`；`doc_index.search`/`tools.search_docs` 透传 `rerank`；CI 拆三通道（A sparse 恒跑 / B hybrid 走向量缓存、未命中明确 skip / C 夜检带密钥跑 sparse+rerank 与 hybrid+rerank）；`backend/run.sh` 明确 `--workers 1`、lifespan 增稀疏检索预热、`tools.py` 增 `_DEGRADED_HINTS`（降级原因 → 处置建议）；**四通道实测**：sparse/off 88.27%/0.760（P50 89.8ms）、sparse/api 89.94%/0.776（`literal` **27/28**，+147ms P50）、hybrid/off **91.62%/0.819**、hybrid/api 90.50%/0.784 —— **重排未达 §11.2 的 +5pp（sparse +0.55pp、hybrid −5.59pp @1），hybrid 上不启用**，根因与 P3 方向见 §8.6 as-built；**回滚演练实测通过**（§14.3）：27ea070 在独立 worktree 里重启 FTS5 重建 6s、旧门禁 79.33%/0.706 PASS、旧套件 344 passed。
+**执行进度（M0–M8 口径，与 T 编号对照）**：M0 配置 ✅ `7dc2917` / M1 评测集 179 条 + FTS5 基线 ✅ `93731e5` / M2 rerank 客户端 ⏸ **后移**（P2a） / M3 Milvus 基建（=T2）✅ `e577b9a`（+ `fe06d91` pk 带 seq）/ M4 构建与增量 CLI（=T3）✅ `3595af5` / M5 检索层（=T4）✅ `e929ab2`（含指纹 TTL 缓存 + `_default_retriever` 进程内缓存；**指纹 TTL 在 M7 随 FTS5 一起删除**；后又按「语料新鲜度检测」的目的加回，见 §10） / M6 Linux 新基线 + 七道门禁（=T1 后半，含权重扫描与延迟口径）▶ **稀疏通道已过门禁**（sparse 88.27%/0.768、导航抢 top1 = 0、literal 26/28、P50 67.5ms，`SCHEMA_VERSION=2` + 列权重重排）；dense/hybrid 仍被 embedding 配额拦住（全量真实向量 ≈9M tokens；慢建中途还撞到间歇 403 `AccessDenied.Unpurchased`） / M7 删 FTS5 + 重写 `test_doc_index.py`（=T5）✅ **完成**：`doc_index.py` 925 → 461 行、`config` 去掉 `fingerprint_ttl_seconds`、默认引擎 `sparse`、`read` 改读文件、`_split_chunks` 兜底切分根治、`tests/test_doc_index.py` 重写，全量 `pytest -q` 342 passed（`d3a0c03` 退避硬化 + `851c746` M7 + `610f02f` CI 建库步骤，已 push；回滚点 tag `fts5-final` → `27ea070`）；分块根治后语料 25077 → **25220 块**、构建 `truncated` 6 → 0；**M7 sparse 重录：命中率@5 88.27% / MRR 0.760 / @10 92.74% / literal 26/28 / 导航抢 top1 = 0（门禁全过）**；**dense/hybrid 首次测出**（全量真向量构建 24138 块 / 962s / `swapped=true` / `verify=ok`）：dense 86.59% / 0.763（P50 175.0ms）、hybrid **91.62% / 0.819**（P50 275.5ms，过 ≥0.85/≥0.72 门禁），`hard` 档 63.64% → 81.82%、`list` 档 45.45% → 36.36% 是唯一退化档，默认引擎仍留 `sparse`（API 依赖 + 延迟是产品取舍） / M8 rerank（P2a=R1–R3）+ 评测器扩展 + CI 三通道 + 运维文档（=T6/T7）✅ **完成**：新建 `backend/app/agent/rerank.py`（`Reranker` 协议 + `ApiReranker`，jina/dashscope 双协议、单次 POST 不重试、失败抛 `RerankUnavailable` 永不 500，`tests/test_rerank.py` 21 例）；`retrieval.py` 把重排接在**融合之后、`MAX_CHUNKS_PER_PATH`/limit 截断之前**，`RetrievalResult` 增 `rerank_ms/reranked/rerank_degraded`，entry 增 `fused_rank/rerank_rank/rerank_score`（`tests/test_retrieval.py` 10 例）；`run_eval.py` 增 `--rerank auto|off|api`、`--min-hit1`、`--max-p50-ms`、`by_source`/`rerank_moved`/`by_tag.hit_at_1`；`doc_index.search`/`tools.search_docs` 透传 `rerank`；CI 拆三通道（A sparse 恒跑 / B hybrid 走向量缓存、未命中明确 skip / C 夜检带密钥跑 sparse+rerank 与 hybrid+rerank）；`backend/run.sh` 明确 `--workers 1`、lifespan 增稀疏检索预热、`tools.py` 增 `_DEGRADED_HINTS`（降级原因 → 处置建议）；**四通道实测**：sparse/off 88.27%/0.760（P50 89.8ms）、sparse/api 89.94%/0.776（`literal` **27/28**，+147ms P50）、hybrid/off **91.62%/0.819**、hybrid/api 90.50%/0.784 —— **重排未达 §11.2 的 +5pp（sparse +0.55pp、hybrid −5.59pp @1），hybrid 上不启用**，根因与 P3 方向见 §8.6 as-built；**回滚演练实测通过**（§14.3）：27ea070 在独立 worktree 里重启 FTS5 重建 6s、旧门禁 79.33%/0.706 PASS、旧套件 344 passed。
 
 **CI 门禁链细节（M7 收尾时踩到并修好）**：`tests/test_retrieval_eval.py` 的三条门禁断言原来依赖 FTS5 时代 `DocIndex.ensure()` 就地建库；M7 删掉懒建后，全新 checkout 里没有索引库 → 检索降级成空结果 → `hit@5 = 0` → CI 必红（实测 `851c746` / `610f02f` 两次 run 都因此失败）。修法：`.github/workflows/ci.yml` 把「构建 Milvus 稀疏索引」（`python -m app.agent.milvus_index --rebuild --no-vectors`，~75s，无需密钥）挪到 **pytest 之前**，两条门禁（pytest 内 + `run_eval.py --strict`）共用同一份索引；同时 `tests/test_retrieval_eval.py` 在索引库缺失时 skip 那三条断言（本地没建库不再误报红），README 的 `docs/` 里索引缺失的本地跑法写清楚。已在「只含 tracked 文件的干净仿真仓」里按 CI 顺序复跑验证：建库 76.8s → `pytest -q` **342 passed** → `run_eval.py --strict` PASS（88.27% / 0.760）；修复提交 `eeec441` 后 GitHub Actions run **36730561018 两个 job 全绿**（Backend pytest + 检索评测门禁、Frontend vitest），M7 收尾完成。
 
@@ -793,7 +797,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 | `pool_k` | 每路候选池大小（固定 50），与输出 `limit` 解耦 |
 | RRF | Reciprocal Rank Fusion，只用排名融合两路 |
 | data_dir | Milvus Lite 的数据目录（WAL + Parquet + 索引 + manifest），**不是单文件** |
-| `ob_meta` | 存 schema 版本、语料指纹、模型与维度的键值集合 |
+| `ob_meta` | 存 schema 版本、语料指纹与语料目录、模型与维度的键值集合 |
 
 ## 附录 B：探针脚本与原始输出
 

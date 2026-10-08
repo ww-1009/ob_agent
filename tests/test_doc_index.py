@@ -453,6 +453,36 @@ def test_search_docs_tool_reports_rerank_degraded(doc_tools):
     assert out["hit_count"] == 1
 
 
+def test_search_docs_tool_reports_index_stale(doc_tools):
+    """索引过期与稠密降级能同时成立：单值 degraded 装不下，所以并列追加两条 hint。"""
+    import app.agent.tools as tools_mod
+    from app.agent import retrieval as rt
+
+    index = tools_mod.get_index()
+    hit = {
+        "path": "ob_wiki/事务隔离级别/MySQL 模式的事务隔离级别.md",
+        "kind": "doc",
+        "section": "隔离级别设置方法",
+        "title": "MySQL 模式的事务隔离级别",
+        "score": 1.0,
+        "snippet": "…",
+    }
+
+    def stale_and_degraded(query, engine, **kwargs):
+        index.last_retrieval = rt.RetrievalResult(
+            entries=[hit], degraded="dense_unavailable", index_stale=True
+        )
+        return [hit]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(index, "_search_milvus", stale_and_degraded)
+        out = json.loads(doc_tools["search_docs"].invoke({"query": "MySQL 模式的事务隔离级别"}))
+    assert out["index_stale"] is True
+    assert out["degraded"] == "dense_unavailable"
+    assert "过期" in out["hint"] and "关键词（稀疏）" in out["hint"], "两条提示都要在"
+    assert out["hit_count"] == 1
+
+
 def test_read_doc_tool_returns_section(doc_tools):
     out = json.loads(doc_tools["read_doc"].invoke(
         {"path": "ob_wiki/问题排查/锁等待排查.md", "section": "典型案例"}

@@ -453,6 +453,23 @@ def test_real_index_dense_and_hybrid_have_no_degradation(built) -> None:
     assert all(e["sources"] for e in hybrid.entries)
 
 
+def test_real_index_flags_stale_corpus(built) -> None:
+    """语料变了但索引没重建：置 index_stale，结果照给（不抛异常、不占用单值 degraded）。"""
+    retriever, _config = built
+    retriever.config.fingerprint_ttl_seconds = 0.0  # 别吃到上一次扫描的 TTL 缓存
+    fresh = retriever.search("事务隔离级别", retriever="sparse", limit=3)
+    assert fresh.index_stale is False
+
+    # 语料目录从 ob_meta 取：查询期复算指纹靠的就是它（不是配置里的默认目录）
+    wiki = Path(retriever.index.read_meta()["corpus_dir"])
+    (wiki / "新增.md").write_text("## 新增小节\n\n索引里还没有这篇文档。\n", encoding="utf-8")
+
+    stale = retriever.search("事务隔离级别", retriever="sparse", limit=3)
+    assert stale.index_stale is True
+    assert stale.degraded == "", "过期不是降级：两件事要能同时说清楚"
+    assert stale.entries and stale.entries[0]["path"] == "ob_wiki/隔离级别.md"
+
+
 # ---------------------------------------------------------------- 后置重排
 
 

@@ -83,7 +83,7 @@ Milvus 迁移不沿用旧文档按 50 条用例写的 80%/88%，一律对照本�
 | Milvus hybrid + rerank api | ≥0.88 | ≥0.75，另加命中率@1 ≥0.65 | 夜检通道 C 的探针；门槛比 B 松（0.784 距 0.78 只剩 0.004，会被重排接口抖动抖红）；**实测 90.50% / 0.784 / @1 70.39%（通过，但见下节的负面结论）** |
 
 外加：`literal` 档退化 ≤1 条（≥19/28）、导航页抢 top1 越界 = 0、故障不得 500（embedding 挂
-只跑稀疏；Milvus 打不开返回空结果 + `retrieval_degraded`；rerank 超时保留融合序）。
+只跑稀疏；Milvus 打不开返回空结果 + `retrieval_degraded`；rerank 超时保留融合序；语料变了但索引没重建 → `index_stale`，结果照给）。
 延迟门禁 M8 已加开关（`--max-p50-ms`），但**只在固定 nightly 机器上开**：延迟与机器强相关，
 本机读数（179 条、空载、新进程 reopen）是 sparse P50 89.1ms / dense 175.0ms / hybrid 275.5ms /
 hybrid+rerank 236.2ms(P95 421.3) —— hybrid 每次查询都要调 embedding API，延迟与配额都是它比
@@ -235,12 +235,22 @@ FTS5 基线期的弱项（保留作历史对照，其中 `lock-wait`、`backup-o
 **改了排序公式、语料或 `SCHEMA_VERSION` 之后**：先跑一次看数字，确认提升再下调阈值；
 如果是有意取舍（某类变好、另一类变差），把两条曲线都写进 PR 说明再调阈值。
 
-## 指纹 TTL 缓存（已随 FTS5 一起删除）
+## 语料新鲜度（查询期）
 
-FTS5 时代 `search` 每次都要遍历全库 stat 一遍算语料指纹（5146 篇实测 **52.4ms**，曾占端到端
-近一半），于是加了 `retrieval.fingerprint_ttl_seconds` TTL 缓存（缓存前 P50 118.0ms → 缓存后
-61.3ms，见 git 历史）。**M7 删掉 FTS5 后这条路径整体不存在了**：索引新鲜度由
-`milvus_index --incremental` 的语料指纹短路负责（构建期一次），检索请求不再扫语料目录。
+构建期靠 `milvus_index --incremental` 的指纹短路决定「是否跳过」；但**查询期**一度完全不检测：
+语料更新了、索引没重建，检索会静默返回旧结果（设计文档 §10 曾把它记为遗留缺口）。现在
+`MilvusRetriever.search` 成功后调 `MilvusIndex.corpus_changed(ttl_seconds=...)`：读 `ob_meta.corpus_dir`
+复算语料指纹，与建库时写的 `corpus_fingerprint` 比对（只比前三个字段 `文件数:总字节:最新mtime`——
+线上指纹还带 `:t{标题重复}k{关键词重复}` 的加权口径签名，那一段无法从语料复算），不等则置
+`RetrievalResult.index_stale = True` 并打一条 warning；`tools.py` 把它翻成「请重建索引」的 hint。
+**结果照给、永不 500**，`index_stale` 与 `degraded` 是并列标记（两者能同时成立）。
+
+- **代价**：真语料 5146 篇扫一遍约 **51ms**，所以按 `retrieval.fingerprint_ttl_seconds`（默认 5.0，
+  0 = 每次重扫）缓存；这条检查是旁路，内部任何异常只记 debug 日志，不影响检索结果。
+- **不误报**：老库没有 `corpus_dir`、目录被移走、扫不出文件（`0:0:0`）都当「没证据」→ 不报过期。
+- 测试：`tests/test_milvus_index.py` 的 `corpus_changed` 五例（新鲜 / 改语料 / 无目录 / 目录不存在 /
+  TTL 缓存）、`tests/test_retrieval.py::test_real_index_flags_stale_corpus`（真库端到端）、
+  `tests/test_doc_index.py::test_search_docs_tool_reports_index_stale`（hint 组装）。
 
 ## 加用例
 
@@ -304,7 +314,7 @@ bash run.sh
   只预热稀疏一路，不引入启动期的外部 API 依赖。
 - **降级怎么排**：`search_docs` 的返回带 `degraded` 与 `hint`（`backend/app/agent/tools.py` 的 `_DEGRADED_HINTS`）。
   `milvus_index_missing` → 按上面第 1 步建库；`milvus_unavailable` → 确认 `--workers 1`、没有别的建索引进程占着库；
-  `index_stale` → `--rebuild`；`dense_unavailable` → 稠密一路不可用（embedding 挂了），只走了稀疏，建议换核心词提问；
+  `index_stale` → 语料比索引新（`ob_meta` 里记的指纹与现在复算的对不上）→ `--rebuild`；TTL 内（默认 5s）不重扫，刚改完语料可能晚一拍才报；`dense_unavailable` → 稠密一路不可用（embedding 挂了），只走了稀疏，建议换核心词提问；
   `rerank_degraded=True` 但 `degraded=""` → 结果按融合序返回，质量略降但功能可用。
   `rerank_skipped="retriever_hybrid|retriever_dense"` → 不是失败，是护栏按「auto 只在 sparse
   上成立」主动没排（要在这两路上量重排得显式 `--rerank api`）。

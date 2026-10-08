@@ -73,6 +73,9 @@ META_DUMMY_DIM = 2
 
 META_SCHEMA_VERSION = "schema_version"
 META_CORPUS_FINGERPRINT = "corpus_fingerprint"
+#: 建库时的语料目录（绝对路径）。指纹只是 ``文件数:总字节:最新 mtime``，**不知道它扫的是哪个
+#: 目录就没法在查询期复算**，所以两者必须一起记。查询期拿它比对见 ``MilvusIndex.corpus_changed``。
+META_CORPUS_DIR = "corpus_dir"
 META_EMBEDDING_MODEL = "embedding_model"
 META_DIMS = "dims"
 META_ANALYZER = "analyzer"
@@ -295,6 +298,16 @@ def probe_and_release(path: Path | str) -> str:
 # ---------------------------------------------------------------- 索引对象
 
 
+def _corpus_part(fingerprint: str) -> str:
+    """取构建指纹里的**语料**那一段。
+
+    构建指纹 = ``文件数:总字节:最新mtime`` + ``:t{标题重复}k{关键词重复}``（加权口径，
+    ``milvus_build.py`` 的 ``build()`` 里拼的）；查询期只能复算前三段，后一段是建库参数、
+    无法从语料复算。
+    """
+    return ":".join(fingerprint.split(":")[:3])
+
+
 @dataclass
 class MilvusIndex:
     """长生命周期的 Milvus 句柄（进程内单例，由 ``get_milvus_index()`` 复用）。
@@ -310,6 +323,8 @@ class MilvusIndex:
     _client: MilvusClient | None = field(default=None, repr=False, compare=False)
     _loaded: set[str] = field(default_factory=set, repr=False, compare=False)
     _has_vectors: bool | None = field(default=None, repr=False, compare=False)
+    #: ``corpus_changed`` 的 ``(语料指纹, monotonic 时刻)`` 缓存；只缓存「扫成功」的结果。
+    _fp_cache: tuple[str, float] | None = field(default=None, repr=False, compare=False)
 
     @property
     def path(self) -> Path:
@@ -553,6 +568,36 @@ class MilvusIndex:
                 "（python -m app.agent.milvus_index --rebuild；带向量时用 --rebuild-vectors）"
             )
 
+    def corpus_changed(self, *, ttl_seconds: float = 5.0) -> bool:
+        """线上索引的语料是否已与 ``ob_meta`` 记录不一致（**查询期**新鲜度检查）。
+
+        判断口径：``corpus_dir`` 目录复算出的语料指纹 ≠ 构建时写下的那一段。不一致只意味着
+        「索引该重建了」，不影响本次结果的可用性——调用方只置降级标记、照常返回。
+
+        ``False`` 有三种含义，都当「没证据说过期」处理（宁可不报，也不误报）：老索引没有
+        ``corpus_dir``（本次改动之前建的）、语料目录不可读/没有 ``.md``、指纹一致。
+
+        全量 ``stat`` 真语料 5146 文件约 51 ms（v1 实测），所以默认按 ``ttl_seconds`` 缓存
+        （0 = 不缓存，每次重扫）。
+        """
+        meta = self.read_meta()
+        dir_text = str(meta.get(META_CORPUS_DIR) or "").strip()
+        stored = _corpus_part(str(meta.get(META_CORPUS_FINGERPRINT) or ""))
+        if not dir_text or not stored:
+            return False
+        now = time.monotonic()
+        cached = self._fp_cache
+        if cached is not None and now - cached[1] < max(0.0, ttl_seconds):
+            return cached[0] != stored
+        # 延迟导入：``milvus_build`` 反过来 import 本模块，模块级 import 会成环。
+        from .milvus_build import corpus_fingerprint
+
+        live = corpus_fingerprint(dir_text)
+        if live.startswith("0:"):  # 0 文件 0 字节：目录不在/空了，不是「语料过期」的证据
+            return False
+        self._fp_cache = (live, now)
+        return live != stored
+
     # ---- 统计与健康 ----
 
     def stats(self) -> dict[str, Any]:
@@ -744,6 +789,7 @@ def _render(stats: Mapping[str, Any]) -> str:
         META_EMBEDDING_MODEL,
         META_BUILT_AT,
         META_CORPUS_FINGERPRINT,
+        META_CORPUS_DIR,
     ):
         if key in meta:
             lines.append(f"meta.{key}: {meta[key]}")

@@ -293,6 +293,9 @@ class RetrievalResult:
     #: 因**检索器护栏**主动跳过重排的原因（``""`` = 没跳过）。与 ``rerank_degraded`` 区分：
     #: 那是「想排但排失败」，这是「按实测结论压根不排」，两者都不该被当成重排生效。
     rerank_skipped: str = ""
+    #: 语料变了但索引没重建（``ob_meta`` 里的语料指纹 ≠ 现在复算的）。同样与 ``degraded``
+    #: 分开：它能和「稠密不可用」同时成立，而两者的处置完全不同（重建索引 vs 换查询词）。
+    index_stale: bool = False
     elapsed_ms: float = 0.0
 
     @property
@@ -765,6 +768,17 @@ class MilvusRetriever:
             entries.append(entry)
         doc_index = _docs()
         out.entries = doc_index._finalize(entries, max(1, int(limit)), prefix=doc_index.WIKI_DIRNAME)
+        # 语料变了但索引没重建：结果可能整篇过期（旧块、缺新块）。只置标记照常返回——
+        # 新鲜度检查读不到 meta 或读不到语料都算「没证据」，绝不能因此让检索失败。
+        try:
+            if index.corpus_changed(ttl_seconds=float(config.fingerprint_ttl_seconds)):
+                out.index_stale = True
+                logger.warning(
+                    "索引语料已过期（ob_meta 记的语料指纹 ≠ 现在复算的）：本次结果可能不是最新"
+                    "文档，请重建索引（python -m app.agent.milvus_index --rebuild）"
+                )
+        except Exception as exc:  # noqa: BLE001 - 新鲜度检查是旁路，失败不该影响检索
+            logger.debug("索引新鲜度检查跳过：%s: %s", type(exc).__name__, exc)
         out.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
         return out
 

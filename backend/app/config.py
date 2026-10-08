@@ -244,6 +244,7 @@ class RetrievalConfig:
     query_timeout_seconds: int = 5
     query_cache_size: int = 512
     max_text_bytes: int = 8000     # 倒排文本上限；Milvus 的 VARCHAR max_length 实测按字符计，这里仍按字节保守守卫
+    fingerprint_ttl_seconds: float = 5.0   # 「语料是否已变」查询期检查的缓存 TTL（秒）；0 = 每次查询重扫
     version_match_bonus: float = 8.0       # 取回后调整（进入 RRF 前）
     nav_section_penalty: float = 12.0
     nav_file_penalty: float = 40.0
@@ -365,6 +366,7 @@ def _validate_retrieval(settings: Settings) -> None:
         ("retrieval.query_timeout_seconds", rt.query_timeout_seconds, 1),
         ("retrieval.query_cache_size", rt.query_cache_size, 0),
         ("retrieval.max_text_bytes", rt.max_text_bytes, 1),
+        ("retrieval.fingerprint_ttl_seconds", rt.fingerprint_ttl_seconds, 0),
         ("rerank.top_n", rk.top_n, 1),
         ("rerank.max_passage_chars", rk.max_passage_chars, 1),
     ):
@@ -573,6 +575,10 @@ def load_settings(
             ),
             max_text_bytes=int(
                 _env_nonempty(env, "RETRIEVAL_MAX_TEXT_BYTES") or retrieval_y.get("max_text_bytes", 8000)
+            ),
+            fingerprint_ttl_seconds=float(
+                _env_nonempty(env, "RETRIEVAL_FINGERPRINT_TTL_SECONDS")
+                or retrieval_y.get("fingerprint_ttl_seconds", 5.0)
             ),
             version_match_bonus=float(
                 _env_nonempty(env, "RETRIEVAL_VERSION_MATCH_BONUS")

@@ -235,6 +235,8 @@ def test_build_fresh_writes_rows_and_meta(wiki: Path, config: RetrievalConfig) -
     assert meta["dims"] == str(DIMS)
     assert meta["analyzer"] == config.analyzer
     assert meta["corpus_fingerprint"] == stats.fingerprint
+    # corpus_dir 存绝对路径：查询期靠它复算指纹（相对路径换个 CWD 就指错地方）
+    assert meta["corpus_dir"] == str(wiki.resolve())
     assert set(meta) >= {"schema_version", "corpus_fingerprint", "embedding_model", "dims", "analyzer", "built_at"}
 
 

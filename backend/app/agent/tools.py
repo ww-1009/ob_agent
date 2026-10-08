@@ -84,8 +84,9 @@ def _classify_error(exc: BaseException) -> tuple[str, str]:
     return "internal", f"工具内部错误（{type(exc).__name__}）"
 
 
-#: 检索降级时给模型的下一步建议。键与 ``RetrievalResult.degraded`` 同口径（设计 §8.7）：
-#: 降级不抛异常，只把「结果为什么少」翻译成模型能行动的提示。
+#: 检索降级/索引过期时给模型的下一步建议。键与 ``RetrievalResult.degraded`` 同口径（设计 §8.7）：
+#: 降级不抛异常，只把「结果为什么少」翻译成模型能行动的提示。例外是 ``index_stale``——它**不是**
+#: ``degraded`` 的取值，对应独立的 ``RetrievalResult.index_stale`` 布尔（设计 §10）。
 _DEGRADED_HINTS = {
     "milvus_index_missing": "文档索引还没建好（本次没查到不代表文档里没有）：请让运维执行 "
     "`python -m app.agent.milvus_index --rebuild --no-vectors` 重建索引后再试。",
@@ -502,13 +503,20 @@ def build_tools(
         # 检索层从不抛异常（设计 §8.7）：降级会静默返回空/偏少的结果，必须让模型知道
         # 「这次没查到」不等于「文档里没有」，否则它会答"没有相关文档"。
         state = getattr(index, "last_retrieval", None)
+        hints: list[str] = []
         if state is not None and state.degraded:
             payload["degraded"] = state.degraded
-            payload["hint"] = _DEGRADED_HINTS.get(
-                state.degraded, f"检索降级（{state.degraded}）：结果可能不完整。"
+            hints.append(
+                _DEGRADED_HINTS.get(state.degraded, f"检索降级（{state.degraded}）：结果可能不完整。")
             )
         elif state is not None and state.rerank_degraded:
-            payload["hint"] = "重排服务不可用，本次结果按融合顺序返回（仍可用，但排序可能不够准）。"
+            hints.append("重排服务不可用，本次结果按融合顺序返回（仍可用，但排序可能不够准）。")
+        # 索引过期与上面两条可以同时成立（单值 degraded 装不下），所以是并列追加，不是 elif
+        if state is not None and state.index_stale:
+            payload["index_stale"] = True
+            hints.append(_DEGRADED_HINTS["index_stale"])
+        if hints:
+            payload["hint"] = " ".join(hints)
         if not hits:
             # 空结果不是错误，但要让模型知道该怎么办：换成更短的核心词再试
             payload.setdefault(
