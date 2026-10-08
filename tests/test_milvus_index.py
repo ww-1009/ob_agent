@@ -47,11 +47,13 @@ def index(tmp_path):
     idx.close()
 
 
-def meta_values(*, dims: int = DIM) -> dict[str, str]:
+def meta_values(*, dims: int = DIM, text_max_length: int = 8000) -> dict[str, str]:
+    """构建流程实际写入 ob_meta 的**七键**（见 ``milvus_build.py`` 模块头）。"""
     return {
         "schema_version": str(SCHEMA_VERSION),
         "analyzer": "jieba",
         "dims": str(dims),
+        "text_max_length": str(text_max_length),
         "embedding_model": "test-model",
         "built_at": "2026-09-30T00:00:00",
         "corpus_fingerprint": "100,200,300",
@@ -184,6 +186,19 @@ def test_meta_mismatch_is_detected(index):
     index.write_meta({"analyzer": "chinese"})
     with pytest.raises(MilvusSchemaMismatch, match="analyzer"):
         index.ensure_collections(create=False)
+
+    index.write_meta(meta_values(text_max_length=index.config.max_text_bytes + 1))
+    with pytest.raises(MilvusSchemaMismatch, match="text_max_length"):
+        index.ensure_collections(create=False)
+
+
+def test_meta_without_text_max_length_is_tolerated(index):
+    """第 7 键是 M7 才加的：老库缺它要放行，与 schema_version/analyzer/dims 的宽容口径一致。"""
+    build(index)
+    index.client.delete(index.config.meta_collection, filter='key == "text_max_length"')
+    meta = index.ensure_collections(create=False)
+    assert "text_max_length" not in meta
+    assert meta["analyzer"] == "jieba"
 
 
 def test_empty_meta_on_existing_collections_is_mismatch(index):

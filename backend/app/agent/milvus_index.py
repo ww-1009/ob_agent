@@ -1,4 +1,4 @@
-"""Milvus Lite 索引层：集合 schema、连接生命周期、``ob_meta`` 读写、启动校验。
+"""Milvus Lite 索引层：集合 schema、连接生命周期、``ob_meta`` 读写、索引侧体检（``validate_retrieval_config``）。
 
 为什么单独一个模块：
 
@@ -107,7 +107,7 @@ class MilvusIndexMissing(MilvusUnavailable):
 
 
 class MilvusSchemaMismatch(MilvusUnavailable):
-    """``ob_meta`` 与当前配置不一致（schema_version / analyzer / dims）：需要重建。"""
+    """``ob_meta`` 与当前配置不一致（schema_version / analyzer / dims / text_max_length）：需要重建。"""
 
 
 @dataclass
@@ -545,6 +545,13 @@ class MilvusIndex:
             raise MilvusSchemaMismatch(
                 f"ob_meta.dims={dims} 与 embedding.dims={self.dims} 不一致：请用 --rebuild-vectors 重算向量"
             )
+        stored_max = str(meta.get(META_TEXT_MAX_LENGTH, ""))
+        if stored_max and stored_max.isdigit() and int(stored_max) != int(self.config.max_text_bytes):
+            raise MilvusSchemaMismatch(
+                f"ob_meta.text_max_length={stored_max} 与 retrieval.max_text_bytes={self.config.max_text_bytes} 不一致："
+                "VARCHAR 上限与截断口径都只在建集合时取一次，改配置必须重建"
+                "（python -m app.agent.milvus_index --rebuild；带向量时用 --rebuild-vectors）"
+            )
 
     # ---- 统计与健康 ----
 
@@ -644,10 +651,13 @@ class MilvusIndex:
 
 
 def validate_retrieval_config(settings: Settings) -> list[str]:
-    """按设计 §6 的表做启动校验。
+    """按设计 §6 的表做索引侧体检。
 
-    硬错误（配置自相矛盾）直接抛 ``RuntimeError``，让进程起不来；软问题返回告警列表。
+    硬错误（配置自相矛盾）抛 ``RuntimeError``；软问题返回告警列表。
     data_dir 的「被占用」判定由 ``probe_and_release`` 完成（不长期持有）。
+
+    **注意：目前没有任何生产调用方**——启动流程只跑 ``config._validate_retrieval``，
+    CLI ``--verify`` / ``--health`` 也不经过这里，只有单测在调（设计 §6 已按现状改写）。
     """
     retrieval = settings.retrieval
     embedding: EmbeddingConfig = settings.embedding
@@ -656,7 +666,7 @@ def validate_retrieval_config(settings: Settings) -> list[str]:
     if embedding.model.strip() and not embedding.base_url.strip():
         raise RuntimeError("embedding.model 已配置但 embedding.base_url 为空：请补 base_url 或清空 model（只跑稀疏一路）")
     if not embedding.model.strip():
-        warnings.append("embedding.model 未配置：只跑稀疏一路（/api/health 标记 dense_disabled）")
+        warnings.append("embedding.model 未配置：只跑稀疏一路（降级信号为 RetrievalResult.degraded=\"dense_unavailable\"；/api/health 目前不含检索字段）")
 
     rerank = settings.rerank
     if rerank.mode == "api" and not (rerank.model.strip() and rerank.base_url.strip()):
@@ -726,7 +736,15 @@ def _render(stats: Mapping[str, Any]) -> str:
     lines.append(f"dense    : {index.get('index_type')} {index.get('metric_type')} state={index.get('state')}")
     lines.append(f"size     : {stats.get('size_mb')} MB")
     meta = stats.get("meta") or {}
-    for key in (META_SCHEMA_VERSION, META_ANALYZER, META_DIMS, META_EMBEDDING_MODEL, META_BUILT_AT, META_CORPUS_FINGERPRINT):
+    for key in (
+        META_SCHEMA_VERSION,
+        META_ANALYZER,
+        META_DIMS,
+        META_TEXT_MAX_LENGTH,
+        META_EMBEDDING_MODEL,
+        META_BUILT_AT,
+        META_CORPUS_FINGERPRINT,
+    ):
         if key in meta:
             lines.append(f"meta.{key}: {meta[key]}")
     for key in ("rows_error", "doc_rows_error", "nav_rows_error", "dense_index_error", "meta_error"):

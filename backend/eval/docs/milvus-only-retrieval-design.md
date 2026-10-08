@@ -25,7 +25,7 @@
 | SQLite 侧车 / `sqlite_numpy` | **彻底删除**（生产与单测都只用 Milvus Lite） |
 | 语料陈旧检测 | 新的 `ob_meta` 集合存 `schema_version` / `corpus_fingerprint` / `embedding_model` / `dims`（取代原 `meta` 表） |
 | Rerank（P2a） | **不变**：API rerank、默认 `auto`、先于稠密/混合落地（理由见 v1 附录 E，实测缺口比例 8:2） |
-| 降级 | embedding 挂 → **只跑稀疏一路**（仍可用）；Milvus 打不开 → 检索整体不可用 + `retrieval_degraded`，返回空结果而非 500 |
+| 降级 | embedding 挂 → **只跑稀疏一路**（仍可用）；Milvus 打不开 → 检索整体不可用 + `degraded="milvus_unavailable"`，返回空结果而非 500 |
 | 预估工作量 | **≈17.0 人日** = T0 1.0 + T1 2.0 + 检索重构 11.0 + P2a 3.0；**不含 rerank = 14.0 人日**（见 §15） |
 | 主要代价 | 无引擎级回退；依赖 +359 MB；data_dir +240 MB（3.5×）；稀疏一路 0.3 ms → 14 ms |
 
@@ -35,7 +35,7 @@
 
 ### 1.1 现状（改造前）
 
-`search_docs` → `DocIndex.search`（[doc_index.py:451](../../app/agent/doc_index.py#L451)）→ `_rank`（[doc_index.py:482](../../app/agent/doc_index.py#L482)），完全建立在 **SQLite FTS5** 上：
+`search_docs` → `DocIndex.search` → `_rank`，完全建立在 **SQLite FTS5** 上。下面描述的是 **M7 删除 FTS5 之前**的旧版 `doc_index.py`（现行的 `doc_index.py` 只剩 472 行、已无 `_rank`；要看旧代码用回滚点 tag `fts5-final`）：
 
 - external-content 虚拟表 + 四列 bm25 权重 `(title, keywords, section, body) = (10, 6, 4, 1)`；
 - 单字 + 双字 CJK 预分词、27 组同义词、41 个停用词/疑问词清洗；
@@ -331,17 +331,26 @@ rerank:               # P2a，与 v1 一致
 
 环境变量沿用 `_env_nonempty`（[config.py:161](../../app/config.py#L161)）语义：**空字符串不覆盖 YAML 非空值**；命名规则为 `RETRIEVAL_*` / `EMBEDDING_*` / `RERANK_*`。
 
-**校验规则（fail fast）**
+**校验规则（哪里校验、失败了会怎样）**
 
-| 条件 | 行为 |
-| --- | --- |
-| `embedding.model` 为空 | 允许启动，但**只能跑稀疏一路**（`/api/health` 标记 `dense_disabled`） |
-| `rerank.mode: api` 且 `rerank.model` / `base_url` 为空 | **启动失败** |
-| `embedding.model` 非空但 `base_url` 为空 | **启动失败** |
-| `milvus_path` 不存在 | 启动时提示"需先建索引"，检索返回空 + `retrieval_degraded` |
-| `milvus_path` 不以 `.db` 结尾 | **启动失败**（milvus-lite 只认 `.db` 后缀，提前报清楚而不是抛底层 ConnectionConfigException） |
-| data_dir 被其他进程占用 | **启动失败**，报错写明 `--workers 1` 约束 |
-| `ob_meta.dims` 与 `embedding.dims` 不一致 | 启动失败，提示需 `--rebuild-vectors` |
+> 这一节按**代码现状**写：只有**配置层**在启动时 fail fast；索引侧的问题不在启动时拦，而是首次打开时抛错、被检索层降级兜住。
+
+启动路径：`load_settings()` 依次跑 `_validate_agent` / `_validate_retrieval` / `_validate_logging`（[config.py:640](../../app/config.py#L640)），抛 `ValueError` 即进程起不来（[main.py:81](../../app/main.py#L81)）。索引侧另有一个 `validate_retrieval_config()`（[milvus_index.py:653](../../app/agent/milvus_index.py#L653)，按 §6 的表做索引侧体检），**但没有任何生产调用方**——CLI 的 `--verify` / `--health` 走 `ensure_collections` / `health()`，不经过它。下表把它单独标出来。
+
+| 条件 | 谁在什么时候校验 | 行为 |
+| --- | --- | --- |
+| `retrieval.default_retriever` 不在 `sparse/dense/hybrid` | 启动（`_validate_retrieval`） | `ValueError` → **启动失败** |
+| `default_retriever` 是 `dense`/`hybrid` 但 embedding 未配置 | 启动（[config.py:397-400](../../app/config.py#L397-L400)） | `ValueError` → **启动失败** |
+| `rerank.mode: api` 且 `rerank.model` / `base_url` 为空 | 启动（[config.py:384](../../app/config.py#L384)） | `ValueError` → **启动失败** |
+| `rerank.mode` 不在 `auto/off/api`，或 `protocol` 不在 `jina/dashscope` | 启动 | `ValueError` → **启动失败** |
+| `timeout_seconds <= 0`、`max_text_bytes < 1` 等数值下界 | 启动 | `ValueError` → **启动失败** |
+| `embedding.model` 为空 | 启动：不校验 | 允许启动；embedding 客户端按"未配置"返回 `None`（[embedding.py:266](../../app/agent/embedding.py#L266)），**只跑稀疏一路**。注意 `/api/health` 目前**不含检索字段**，没有 `dense_disabled` 这种键；降级只能从结果的 `degraded` 看出 |
+| `embedding.model` 非空但 `base_url` 为空 | 仅 `validate_retrieval_config()`（无调用方） | 该函数会抛 `RuntimeError`，但**生产路径没人调它** → 实际不拦，启动成功并走稀疏降级 |
+| `milvus_path` 不存在 | 启动预热 / 查询 | 预热只打一条 `logger.debug` 后跳过（[main.py:49-70](../../app/main.py#L49-L70)）；查询返回空 + `degraded="milvus_index_missing"` |
+| `milvus_path` 不以 `.db` 结尾 | 首次打开（`open_client`，[milvus_index.py:248-260](../../app/agent/milvus_index.py#L248-L260)） | `MilvusUnavailable`（milvus-lite 只认 `.db`）→ 查询降级 `degraded="milvus_unavailable"`；**不是启动失败** |
+| data_dir 被其他进程占用 | 首次打开 | 同上 `MilvusUnavailable` + `_lock_error_hint` 里的 `--workers 1` 提示；**不是启动失败** |
+| `ob_meta.dims` 与 `embedding.dims` 不一致 | `--verify` / 构建期 `ensure_collections` | `MilvusSchemaMismatch`：`--verify` 报错；构建期不带向量整集重建、带向量要求 `--rebuild-vectors`。**查询路径不跑这项检查**（`MilvusSchemaMismatch` 继承 `MilvusUnavailable`，一旦抛也被 `_MILVUS_ERRORS` 兜住 → `degraded="milvus_unavailable"`，仍不 500） |
+| `ob_meta.text_max_length` 与 `retrieval.max_text_bytes` 不一致 | 同上 | 同上：`--verify` 报错；构建期不带向量整集重建成新上限，带向量要求 `--rebuild-vectors` |
 
 ---
 
@@ -365,7 +374,7 @@ python -m app.agent.milvus_index --help               # --limit N / --wiki-dir D
 4. 组装行：`text` = `{标题前缀重复} > {小节} | {正文}`（§8.2 的权重复刻），`text` 与 `vector` 一起 `upsert`。
    - **超长块截断（M4 实测必须）**：`_split_chunks` 对**没有 H2/H3 的文件**走「`h1 or 正文` 整篇一块」兜底，绕过了 1800 字切分——真语料里有 55 篇这样的文件（H1-only 且正文 >1800 字），其中 6 篇正文 >8000 字（8k–40k 字，`组件 & 工具/运维管理/obshell/错误码.md` 最大 40199 字 → 23 块），Milvus 直接 `code=6, VARCHAR field 'text' value length 16189 exceeds max_length=8000` 拒收，embedding 也会超模型输入上限。构建侧按 `retrieval.max_text_bytes`（默认 8000 **字节**，比 schema 的字符上限保守）截断并补 `…`，`BuildStats.truncated` 记账。~~给 M6/M7 的遗留项~~ **M7 已根治**：兜底路径改走同一套 `hard_split`（空行优先、否则 1800 字硬切），`max_text_bytes` 退回纯守卫（只有把配置值压到异常小时才会触发截断）。
 5. **剪枝**：删除本次不再存在的 `pk`（文件被删/小节改名）：`delete(filter="pk in [...]")` 分批执行。
-6. 写入 `ob_meta`：`schema_version` / `corpus_fingerprint` / `embedding_model` / `dims` / `analyzer` / `built_at`。
+6. 写入 `ob_meta`（七键）：`schema_version` / `corpus_fingerprint` / `embedding_model` / `dims` / `analyzer` / `text_max_length` / `built_at`。
 7. 原子切换临时目录。
 
 > **导航文件（`kind='nav'`）写入 `ob_chunks` 但不嵌入**（M3 决议，取代上一版「不写入」的说法）：导航行照常参与稀疏一路，稠密一路恒 `filter kind == "doc"`，因此 `include_index=true` 时导航页仍可出现（走 BM25），而稠密一路永远不会把导航页顶到前面。**为什么必须写进去**：`_is_navigation_section` 的 −40 惩罚与「导航页永不 top1」硬门禁（[tests/test_retrieval_eval.py:71](../../../tests/test_retrieval_eval.py#L71)）都靠这一行的存在；而 `FLOAT_VECTOR` 不可空（probe7 第 1 节），所以导航行的向量写零向量（COSINE 下 distance=0，只要不加过滤也不会盖过真正相关的 doc 行）。**代价**：导航行多占一份 `text` 存储。
@@ -523,15 +532,18 @@ fused = _rrf(sparse_hits, dense_hits, k=60, w=(weight_sparse, weight_dense))
 
 **不变量**：任何检索相关故障都**不得**返回 500、不得让 agent 崩溃。
 
-| 故障 | 行为 | 观测 |
-| --- | --- | --- |
-| embedding 端点超时/不可用 | **只跑稀疏一路**（BM25 仍在 Milvus 内，检索可用） | `dense_degraded: true` |
-| embedding 未配置 | 与上同（常态降级，不算故障） | `dense_disabled: true` |
-| rerank 端点超时/不可达 | 保留融合顺序 | `rerank_degraded: true` |
-| **Milvus data_dir 打不开 / 被锁** | 检索返回空列表 + 说明性 `hint`（"检索索引不可用"） | `retrieval_degraded: true`（**新单点**） |
-| `ob_meta` 与语料指纹不一致 | 正常检索，但提示需重建 | `index_stale: true` |
+降级的**对外信号只有两个**：`RetrievalResult.degraded`（字符串）与 `RetrievalResult.rerank_degraded`（布尔）；`tools.py` 的 `_DEGRADED_HINTS` 把它翻译成给模型的处置建议（[tools.py:87-98](../../app/agent/tools.py#L87-L98)）。**`/api/health` 当前不含任何检索字段**（只有 `status`/`ocp_provider`/`sql_provider`/`llm_configured`/`memory_enabled`/`auth_enabled`，[chat.py:220-235](../../app/api/chat.py#L220-L235)）；索引侧体检只在 CLI `--health` / `--verify` 上。
 
-> `/api/health` 只增字段，前端 `HealthBadge` 忽略未知字段。
+| 故障 | 行为 | 可观测信号 |
+| --- | --- | --- |
+| embedding 端点超时/不可用 | **只跑稀疏一路**（BM25 仍在 Milvus 内，检索可用） | `degraded = "dense_unavailable"`（[retrieval.py:507](../../app/agent/retrieval.py#L507)、`:514`、`:519`），提示语"稠密向量不可用…换 2-4 字的核心词重试" |
+| embedding 未配置 / 索引是 `--no-vectors` 建的 | 与上同（常态降级，不算故障） | 同上 `"dense_unavailable"`（[retrieval.py:677](../../app/agent/retrieval.py#L677)）；**代码里没有 `dense_disabled` / `dense_degraded` 这两个键** |
+| rerank 端点超时/不可达 | 保留融合顺序 | `rerank_degraded = True`（[retrieval.py:558](../../app/agent/retrieval.py#L558)、`:563`、`:574`、`:580`） |
+| **Milvus data_dir 打不开 / 被锁** | 检索返回空列表 + 说明性 hint（"检索索引不可用"） | `degraded = "milvus_unavailable"`（[retrieval.py:661](../../app/agent/retrieval.py#L661)、`:688`）；CLI `--health` 另报 `retrieval_degraded: true`（[milvus_index.py:622-626](../../app/agent/milvus_index.py#L622-L626)，**新单点**） |
+| data_dir 不存在 | 同上，空结果 | `degraded = "milvus_index_missing"`（[retrieval.py:646](../../app/agent/retrieval.py#L646)）+ `--rebuild --no-vectors` 建议 |
+| 语料已更新但索引未重建 | **完全不检测**：指纹只在构建期用来决定「是否跳过」（[milvus_build.py:434](../../app/agent/milvus_build.py#L434)），查询路径不比对（`retrieval.py` / `doc_index.py` 里没有 `fingerprint`） | 既无 `degraded` 也无别的提示；`_DEGRADED_HINTS` 里的 `index_stale` 文案（[tools.py:94](../../app/agent/tools.py#L94)）**没有任何代码会触发**（v1 的 `_is_current` 随 FTS5 一起删了）——**属遗留缺口，建议补回** |
+
+> `/api/health` 是只读快照；前端 `HealthBadge` 只读它认识的键（`ocp_provider`/`sql_provider`/`llm_configured`，[HealthBadge.vue:22-26](../../../frontend/src/components/HealthBadge.vue#L22-L26)），所以给 `/api/health` 加检索字段不会破坏界面。**但"把检索健康度暴露出来"目前还没做**——这是 P2 待办，不是既成事实。
 
 ---
 
@@ -666,7 +678,7 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 ### 14.2 灰度与验证
 
 - 上线前后各跑一遍全量评测，保存 `--json` 报告 diff（`rescued` / `broken` 逐条解释）。
-- 生产观察：`/api/health` 的 `retrieval_degraded` / `dense_degraded` / `index_stale` 三个标志。
+- 生产观察：检索结果的 `degraded` / `rerank_degraded` 字段（`tools.py` 会把它翻成给模型的提示）；索引侧另有 CLI `--health` 的 `retrieval_degraded`。`/api/health` **目前不含检索字段**，要先加。
 
 ### 14.3 回滚（**这是 v2 最大的弱点，必须写清楚**）
 
@@ -724,11 +736,11 @@ FTS5 基线（hit@1 60.00% / @5 82.00% / MRR@10 0.704）**不再可比**——�
 
 | # | 风险 | 影响 | 概率 | 缓解 |
 | --- | --- | --- | --- | --- |
-| 1 | **无引擎级回退**：Milvus 打不开 = 检索完全不可用 | 检索整体中断 | 中 | 保留一个周期的 v1 镜像（§14.3）；`--verify` 健康检查；启动即校验 data_dir 可打开；`retrieval_degraded` 明确暴露 |
+| 1 | **无引擎级回退**：Milvus 打不开 = 检索完全不可用 | 检索整体中断 | 中 | 保留一个周期的 v1 镜像（§14.3）；`--verify` 健康检查；`degraded` 字段明确暴露（启动时**不**校验 data_dir 能否打开，见 §6） |
 | 2 | **Milvus Lite 处于 Beta**，3.x 与旧 v1 格式不兼容 | 升级即需重建 | 中 | 精确 pin 版本；向量是派生数据，可重建 |
 | 3 | **jieba 分词改变检索口径**，`literal` 类退化 | 错误码/版本号查询变差 | 中 | 探针已初步通过（§3.5）；T1 用 `by_tag.literal` 逐条比对；备选"自建稀疏向量"精确复刻权重 |
 | 4 | **依赖 +359 MB、data_dir 240 MB** | 与"轻量离线演示"气质冲突；镜像/CI 变重 | 高 | 缓存 wheel 与 data_dir artifact；镜像分层；README 明确体积 |
-| 5 | **单进程文件锁 + gRPC fork 警告** | 多 worker / `--reload` 直接失败 | 中 | 启动校验 + 明确报错；文档写明 `--workers 1`、禁 preload/reload |
+| 5 | **单进程文件锁 + gRPC fork 警告** | 多 worker / `--reload` 直接失败 | 中 | 首次打开即明确报错（`_lock_error_hint` 直接点名 `--workers 1`）；文档写明 `--workers 1`、禁 preload/reload |
 | 6 | 稀疏一路延迟 0.3 ms → 6–14 ms | 端到端变慢 | 低 | 绝对量仍 <20 ms；指纹（51.3 ms）才是瓶颈，由 T0 解决 |
 | 7 | 四列权重只能"前缀重复"近似 | BM25 排序质量不及 FTS5 调优结果 | 中 | **已缓解（M6）**：前缀重复确实不够（最好 78.21%/0.665），改用「`keywords` 另存一列 + 客户端列权重重排」后 sparse 88.27%/0.768 反超 FTS5，`literal` 26/28；自建稀疏向量备选未启用 |
 | 8 | IDF 段内统计（探针未复现，但证据弱） | 分数随写入漂移 → 门禁不稳 | 低 | T1 用真语料复测（追加写入前后比对分数）；若有漂移改为定期重建 |

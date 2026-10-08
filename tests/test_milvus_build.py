@@ -130,6 +130,28 @@ def test_schema_bump_with_vectors_requires_rebuild_vectors(wiki: Path, config: R
         make_builder(wiki, config).build(mode=mb.MODE_REBUILD)
 
 
+def test_max_text_bytes_change_recreates_collection_without_vectors(
+    wiki: Path, config: RetrievalConfig
+) -> None:
+    """改了 ``max_text_bytes``：VARCHAR 上限只在建集合时取一次，增量构建必须整集重建成新上限。"""
+    make_builder(wiki, replace(config, max_text_bytes=64)).build(mode=mb.MODE_INCREMENTAL, vectors=False)
+
+    stats = make_builder(wiki, config).build(mode=mb.MODE_INCREMENTAL, vectors=False)
+    data_dir = config.resolve_milvus_path()
+    assert stats.skipped == 0  # meta 不一致 → 语料指纹短路不成立，旧行不能复用
+    assert len(read_rows(config, data_dir)) == 3
+    assert read_meta(config, data_dir)["text_max_length"] == str(config.max_text_bytes)
+
+
+def test_max_text_bytes_change_with_vectors_requires_rebuild_vectors(
+    wiki: Path, config: RetrievalConfig
+) -> None:
+    """上限变了而本轮带向量：旧向量不能跨 schema 复用，必须让用户显式加 ``--rebuild-vectors``。"""
+    make_builder(wiki, replace(config, max_text_bytes=64)).build(mode=mb.MODE_INCREMENTAL)
+    with pytest.raises(MilvusUnavailable, match="--rebuild-vectors"):
+        make_builder(wiki, config).build(mode=mb.MODE_INCREMENTAL)
+
+
 # ---------------------------------------------------------------- 扫描
 
 

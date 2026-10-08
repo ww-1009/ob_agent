@@ -69,7 +69,7 @@ retrieval:
   weight_dense: 1.0
   query_timeout_seconds: 5
   query_cache_size: 512
-  max_text_bytes: 8000         # 倒排文本字节上限（Milvus VARCHAR 按字节计）
+  max_text_bytes: 8000         # 入库文本的 UTF-8 字节上限（截断守卫）；Milvus 的 VARCHAR max_length 实测按字符计，故本值更保守
   version_match_bonus: 8.0     # 取回后、进入 RRF 前的分数调整
   nav_section_penalty: 12.0
   nav_file_penalty: 40.0
